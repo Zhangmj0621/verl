@@ -22,6 +22,7 @@ import ray
 from omegaconf import DictConfig
 
 from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
+from recipe.fully_async_policy.sglang_rollout.async_sglang_server import FullyAsyncSGLangReplica
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
     AgentLoopOutput,
@@ -160,7 +161,8 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.reward_model_manager = None
         self.reward_router_address = None
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
-        self.rollout_replica_class = FullyAsyncvLLMReplica
+        # self.rollout_replica_class = FullyAsyncvLLMReplica
+        self.rollout_replica_class = FullyAsyncSGLangReplica
 
         self.rm_wg = rm_wg
         self.rollout_replicas = None
