@@ -22,7 +22,6 @@ import ray
 from omegaconf import DictConfig
 
 from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
-from recipe.fully_async_policy.sglang_rollout.async_sglang_server import FullyAsyncSGLangReplica
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
     AgentLoopOutput,
@@ -154,6 +153,27 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
             return await agent_loop.run(sampling_params, **kwargs)
 
 
+def _load_fully_async_sglang():
+    os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
+
+    try:
+        import vllm  # noqa: F401
+    except ImportError:
+        import sys
+        from unittest.mock import Mock
+
+        mock_vllm = Mock()
+        mock_vllm._custom_ops = Mock()
+        mock_vllm._custom_ops.scaled_fp8_quant = Mock()
+        sys.modules["vllm"] = mock_vllm
+        sys.modules["vllm._custom_ops"] = mock_vllm._custom_ops
+
+    from recipe.fully_async_policy.sglang_rollout.async_sglang_server import FullyAsyncSGLangReplica
+
+    del os.environ["SGLANG_USE_CPU_ENGINE"]
+    return FullyAsyncSGLangReplica
+
+
 class FullyAsyncAgentLoopManager(AgentLoopManager):
     def __init__(self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_wg: RayWorkerGroup = None):
         self.config = config
@@ -162,7 +182,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self.reward_router_address = None
         self.agent_loop_workers_class = FullyAsyncAgentLoopWorker
         # self.rollout_replica_class = FullyAsyncvLLMReplica
-        self.rollout_replica_class = FullyAsyncSGLangReplica
+        self.rollout_replica_class = _load_fully_async_sglang()
 
         self.rm_wg = rm_wg
         self.rollout_replicas = None

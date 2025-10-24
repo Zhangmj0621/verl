@@ -18,7 +18,8 @@ from typing import Any, Optional, Sequence
 import ray
 import torch
 import sglang.srt.entrypoints.engine
-from ray.actors import ActorHandle
+import copy
+from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
     ServerArgs,
     _GlobalState,
@@ -105,6 +106,9 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             self.req_output[request_id] = None
             self.cancel_event[request_id] = asyncio.Event()
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
+            sampling_params.pop('logprobs', None)
+            # Convert prompt_ids from list[int] to GPU tensor
+            #prompt_ids_tensor = torch.tensor(prompt_ids, device="cuda").unsqueeze(0)
             generation_handle = asyncio.create_task(
                 self._generate_step(prompt_ids, sampling_params, request_id, image_data)
             )
@@ -122,18 +126,12 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             if output is None:
                 return [], [], True  # indicate cancelled
             
-            token_ids = []
-            log_probs = []
-            
-            if "meta_info" in output and "output_token_logprobs" in output["meta_info"]:
-                output_token_logprobs = output["meta_info"]["output_token_logprobs"]
-                for log_prob, token_id, _ in output_token_logprobs:
-                    token_ids.append(token_id)
-                    log_probs.append(log_prob)
-            else:
-                token_ids = output.get("output_ids", [])
+            output_token_logprobs = output["meta_info"]["output_token_logprobs"]
+            log_probs, token_ids = zip(
+                *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
+            )
                 
-            is_cancel = generation_handle in done
+            is_cancel = generation_handle not in done
             self.cancel_event.pop(request_id, None)
             self.req_output.pop(request_id, None)
         return token_ids, log_probs, is_cancel
@@ -150,7 +148,8 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             
     async def reset_prefix_cache(self):
         async with self.lock:
-            await self.tokenizer_manager.flush_cache()
+            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
+            await self.tokenizer_manager.release_memory_occupation(obj, None)
             
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
