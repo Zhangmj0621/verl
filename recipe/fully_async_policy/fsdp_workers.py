@@ -133,25 +133,12 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                 if self.config.rollout.name == "vllm":
                     inference_model.load_weights([(key, tensor)])
                 elif self.config.rollout.name == "sglang":
-                    # loop.run_until_complete(self.update_weights(inference_model, [(key, tensor)]))
+                    # update weights
                     single_item_generator = (p for p in [(key, tensor)])
-                    # loop.run_until_complete(self.rollout.update_weights(single_item_generator))
                     coroutine_to_run = self.rollout.update_weights(single_item_generator)
                     run_async_in_sync(coroutine_to_run)
         get_torch_device().empty_cache()
 
-    async def update_weights(self, inference_engine, params):
-        from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
-
-        await sgl_update_weights(
-            engine=inference_engine,
-            params_batch=params,
-            device_mesh_key="infer_tp",
-            device_mesh=self.rollout_device_mesh,
-        )
-
-        if self.rollout_device_mesh["infer_tp"].get_local_rank() == 0:
-            await inference_engine.flush_cache()
 
 
 class DetachActorWorker(DetachNcclSync):

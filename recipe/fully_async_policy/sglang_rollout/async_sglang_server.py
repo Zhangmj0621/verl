@@ -87,12 +87,12 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             return_logprob=return_logprob,
             image_data=image_data,
         )
-        
+
         output = await self.tokenizer_manager.generate_request(request, None).__anext__()
-        
+
         self.req_output[request_id] = output
         assert self.req_output[request_id] is not None
-        
+
     async def generate_for_partial(
         self,
         prompt_ids: torch.Tensor,
@@ -108,49 +108,53 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             cancel_handle = asyncio.create_task(self.cancel_event[request_id].wait())
             sampling_params.pop('logprobs', None)
             # Convert prompt_ids from list[int] to GPU tensor
-            #prompt_ids_tensor = torch.tensor(prompt_ids, device="cuda").unsqueeze(0)
+            # prompt_ids_tensor = torch.tensor(prompt_ids, device="cuda").unsqueeze(0)
             generation_handle = asyncio.create_task(
                 self._generate_step(prompt_ids, sampling_params, request_id, image_data)
             )
-            
+
         done, pend = await asyncio.wait([generation_handle, cancel_handle], return_when=asyncio.FIRST_COMPLETED)
-        
+
         for task in done:
             await task
-        
+
         for task in pend:
             task.cancel()
-            
+
         async with self.lock:
             output = self.req_output[request_id]
             if output is None:
                 return [], [], True  # indicate cancelled
             
+            if output["meta_info"]["finish_reason"]["type"] == "abort":
+                return [], [], True  # indicate cancelled
+
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
                 *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
             )
-                
+
             is_cancel = generation_handle not in done
             self.cancel_event.pop(request_id, None)
             self.req_output.pop(request_id, None)
-        return token_ids, log_probs, is_cancel
-    
+        return  list(token_ids), list(log_probs), is_cancel
+
     async def cancel(self):
+        # async with self.lock:
+        #    self.paused = True
+        #    for request_id in self.cancel_event:
+        #        self.cancel_event[request_id].set()
         async with self.lock:
-            self.paused = True
-            for request_id in self.cancel_event:
-                self.cancel_event[request_id].set()
-                
+            self.tokenizer_manager.abort_request(abort_all=True)
+
     async def resume(self):
         async with self.lock:
             self.paused = False
-            
+
     async def reset_prefix_cache(self):
         async with self.lock:
-            obj = ReleaseMemoryOccupationReqInput(tags=["kv_cache"])
-            await self.tokenizer_manager.release_memory_occupation(obj, None)
-            
+            self.tokenizer_manager.abort_request(abort_all=True)
+
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
         self, 
@@ -173,6 +177,3 @@ class FullyAsyncSGLangReplica(SGLangReplica):
     async def reset_prefix_cache(self):
         """reset kv cache in each rollout server."""
         await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])
-       
-        
-        
