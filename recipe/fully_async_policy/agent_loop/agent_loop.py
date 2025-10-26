@@ -21,7 +21,7 @@ import numpy as np
 import ray
 from omegaconf import DictConfig
 
-from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
+#from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
     AgentLoopOutput,
@@ -41,13 +41,14 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
-    async def generate_for_partial(self, request_id, prompt_ids, sampling_params) -> TokenOutput:
+    async def generate_for_partial(self, request_id, prompt_ids, sampling_params, image_data=None) -> TokenOutput:
         """Generate tokens from prompt ids. with partial rollout function"""
         server = self._choose_server(request_id)
         output = await server.generate_for_partial.remote(
             request_id=request_id,
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
+            image_data=image_data,
         )
         return output
 
@@ -57,12 +58,16 @@ class FullyAsyncAgentLoopOutput(AgentLoopOutput):
 
     is_cancel: bool = False
     """Indicates whether the request was interrupted"""
-    log_probs: list[float] = None
+    log_probs: Optional[list[float]] = None
     """Response token log probs including LLM generated token, tool response token."""
     param_version_start: int = 0
     """Indicate start parameter version when this response is generated"""
     param_version_end: int = 0
     """Indicate end parameter version when this response is generated, used for partial rollout"""
+    assistant_turns: int = 0
+    """Number of assistant turns in the current conversation."""
+    user_turns: int = 0
+    """Number of user turns in the current conversation."""
 
 
 @ray.remote
