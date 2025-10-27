@@ -127,7 +127,17 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
                 return [], [], True  # indicate cancelled
             
             if output["meta_info"]["finish_reason"]["type"] == "abort":
-                return [], [], True  # indicate cancelled
+                self.cancel_event.pop(request_id, None)
+                self.req_output.pop(request_id, None)
+                if "output_token_logprobs" not in output["meta_info"]:
+                    return [], [], True  # indicate cancelled
+                else:
+                    output_token_logprobs = output["meta_info"]["output_token_logprobs"]
+                    log_probs, token_ids = zip(
+                        *[(log_prob, token_ids) for log_prob, token_ids, _ in output_token_logprobs], strict=True
+                    )
+                    is_cancel = True
+                    return list(token_ids), list(log_probs), is_cancel
 
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
