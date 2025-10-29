@@ -471,7 +471,14 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.processor_task = asyncio.create_task(self._processor_worker())
         self.consumer_task = asyncio.create_task(self._consumer_worker())
 
+        tasks = [self.feed_task, self.processor_task, self.consumer_task]
+
         try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                if task.exception():
+                    raise task.exception()
             # Wait for sample feed to complete
             await self.feed_task
             print("[FullyAsyncRollouter] Sample feed completed")

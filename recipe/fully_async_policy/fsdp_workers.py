@@ -29,6 +29,7 @@ from verl.utils.device import (
 from verl.utils.fsdp_utils import (
     fsdp_version,
 )
+from verl.utils.ray_utils import get_event_loop
 from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
 logger = logging.getLogger(__file__)
@@ -37,6 +38,41 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 __all__ = ["DetachActorWorker", "DetachAsyncRolloutWorker", "CriticWorker"]
+
+import asyncio
+import threading
+from typing import Coroutine, Any
+
+
+def run_async_in_sync(coro: Coroutine) -> Any:
+    result = None
+    exception = None
+    event = threading.Event()
+
+    def run_in_new_thread():
+        nonlocal result, exception
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            result = loop.run_until_complete(coro)
+
+        except Exception as e:
+            exception = e
+        finally:
+            event.set()
+
+    thread = threading.Thread(target=run_in_new_thread)
+    thread.start()
+
+    event.wait()
+
+    thread.join()
+
+    if exception:
+        raise exception
+
+    return result
 
 
 def get_inference_model(rollout):
@@ -71,11 +107,16 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
 
         params = self._get_actor_params() if self._is_actor else None
         if self._is_rollout:
-            inference_model = get_inference_model(self.rollout)
+            if self.config.rollout.name == "vllm":
+                inference_model = get_inference_model(self.rollout)
 
-            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-            patch_vllm_moe_model_weight_loader(inference_model)
+                patch_vllm_moe_model_weight_loader(inference_model)
+            elif self.config.rollout.name == "sglang":
+                inference_model = self.rollout._engine
+            else:
+                raise NotImplementedError(f"Unknown rollout name: {self.config.rollout.name}")
         for key, shape, dtype in self._weights_info:
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:
@@ -89,8 +130,15 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
 
             collective.broadcast(tensor, src_rank=0, group_name="actor_rollout")
             if self._is_rollout:
-                inference_model.load_weights([(key, tensor)])
+                if self.config.rollout.name == "vllm":
+                    inference_model.load_weights([(key, tensor)])
+                elif self.config.rollout.name == "sglang":
+                    # update weights
+                    single_item_generator = (p for p in [(key, tensor)])
+                    coroutine_to_run = self.rollout.update_weights(single_item_generator)
+                    run_async_in_sync(coroutine_to_run)
         get_torch_device().empty_cache()
+
 
 
 class DetachActorWorker(DetachNcclSync):

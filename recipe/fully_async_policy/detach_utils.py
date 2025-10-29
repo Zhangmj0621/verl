@@ -151,8 +151,8 @@ def prepare_single_generation_data(batch_dict, global_steps, rollout_n) -> DataP
         non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
     )
 
-    # Setting agent - partial_single_turn_agent, that supports partial
-    full_batch.non_tensor_batch["agent_name"] = np.array(["partial_single_turn_agent"] * len(full_batch), dtype=object)
+    # Setting agent - partial_tool_agent, that supports partial
+    full_batch.non_tensor_batch["agent_name"] = np.array(["partial_tool_agent"] * len(full_batch), dtype=object)
 
     # Add global step count to generated data
     full_batch = full_batch.repeat(repeat_times=rollout_n, interleave=True)
