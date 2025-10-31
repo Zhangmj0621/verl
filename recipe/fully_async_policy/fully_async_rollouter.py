@@ -14,6 +14,8 @@
 import asyncio
 import time
 from pprint import pformat
+from typing import Coroutine, Any, Tuple, List, Dict
+import copy
 
 import ray
 from ray import ObjectRef
@@ -150,6 +152,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.result_queue = asyncio.Queue()
         self.cancel_queue = asyncio.Queue()
 
+        # temp rollout samples
+        self.temp_rollout_samples: Dict[str, List] = {}
+        self.temp_rollout_samples_lock = asyncio.Lock()
+
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
         async with self.lock:
@@ -169,6 +175,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
             self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
+            self.max_concurrent_requests = self.max_concurrent_samples * self.config.actor_rollout_ref.rollout.n
             self.max_queue_size = self.max_required_samples
 
             print(
@@ -178,6 +185,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 f"total_train_steps: {self.total_train_steps} "
                 f"total_rollout_steps: {self.total_rollout_steps} "
                 f"max_concurrent_samples: {self.max_concurrent_samples} "
+                f"max_concurrent_requests: {self.max_concurrent_requests}"
             )
 
     def get_rollout_wg(self):
@@ -190,6 +198,19 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
+    async def time_task_wrapper(
+        sample: RolloutSample, 
+        start_time: float = None
+    ) -> Tuple[Any, float]:
+        """
+        Wrapper to time an asynchronous task.
+        """
+        try:
+            result = await coro
+            return result, time.monotonic() - start_time
+        except Exception as e:
+            raise e
+
     async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0):
         """Update current parameter version"""
         async with self.lock:
@@ -198,9 +219,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # every time param change, reset staleness_samples
             self.staleness_samples = (
                 len(self.active_tasks)
-                + self.result_queue.qsize()
+                + self.result_queue.qsize() * self.config.actor_rollout_ref.rollout.n
                 + self.cancel_queue.qsize()
-                + await self.message_queue_client.get_queue_size()
+                + (await self.message_queue_client.get_queue_size()) * self.config.actor_rollout_ref.rollout.n
             )
             timing_raw = {}
             idle_ratio = None
@@ -359,13 +380,13 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
             simple_from_cancel_queue = False
             if not self.cancel_queue.empty():
-                rollout_sample = await self.cancel_queue.get()
+                rollout_sample, request_index = await self.cancel_queue.get()
                 simple_from_cancel_queue = True
             else:
                 rollout_sample = await self.pending_queue.get()
-                self.staleness_samples += 1
+                self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
 
-            if rollout_sample == "DONE":
+            if not simple_from_cancel_queue and rollout_sample == "DONE":
                 print(
                     "[FullyAsyncRollouter][Processor] Received end signal, waiting for remaining tasks to complete..."
                 )
@@ -379,8 +400,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                             await task
                 break
 
+            slot = 1 if simple_from_cancel_queue else self.config.actor_rollout_ref.rollout.n
             # Check whether the number of concurrent tasks exceeds the limit
-            while len(self.active_tasks) >= self.max_concurrent_samples:
+            while len(self.active_tasks) >= self.max_concurrent_requests - slot + 1:
                 async with self.lock:
                     if self.active_tasks:
                         done_tasks, self.active_tasks = await asyncio.wait(
@@ -395,16 +417,57 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 # to determine whether it is the pause phase, otherwise continue to wait
                 while self.paused:
                     await self.condition.wait()
-                task = asyncio.create_task(
-                    self._process_single_sample_streaming(rollout_sample),
-                    name=rollout_sample.sample_id,
-                )
-                self.active_tasks.add(task)
+                if simple_from_cancel_queue:
+                    task = asyncio.create_task(
+                        self._process_single_request_streaming(rollout_sample, request_index),
+                        name=f"{rollout_sample.sample_id}:{request_index}",
+                    )
+                    self.active_tasks.add(task)
+                else:
+                    for request_index in range(self.config.actor_rollout_ref.rollout.n):
+                        task = asyncio.create_task(
+                            self._process_single_request_streaming(copy.deepcopy(rollout_sample), request_index),
+                            name=f"{rollout_sample.sample_id}:{request_index}",
+                        )
+                        self.active_tasks.add(task)
 
             if simple_from_cancel_queue:
                 self.cancel_queue.task_done()
             else:
                 self.pending_queue.task_done()
+
+    async def _process_single_request_streaming(self, rollout_sample: RolloutSample, request_index: int):
+        """Process a single request streamingly"""
+        # Calling asynchronous generation methods
+        partial_output = rollout_sample.agent_loop_output_list[request_index]
+        rollout_sample.full_batch.non_tensor_batch["param_version"] = [self.current_param_version] * len(
+            rollout_sample.full_batch
+        )
+        agent_loop_output = await self.async_rollout_manager.generate_single_request_async(
+            rollout_sample.full_batch, request_index, partial_output
+        )
+
+        async with self.temp_rollout_samples_lock:
+            if rollout_sample.sample_id not in self.temp_rollout_samples:
+                self.temp_rollout_samples[rollout_sample.sample_id] = [rollout_sample, 0]
+            self.temp_rollout_samples[rollout_sample.sample_id][0].agent_loop_output_list[request_index] = agent_loop_output
+            self.temp_rollout_samples[rollout_sample.sample_id][1] += 1
+
+        is_cancel = agent_loop_output.is_cancel
+        is_processing_tools = agent_loop_output.is_processing_tools
+        is_interaction = agent_loop_output.is_interaction
+
+        if is_cancel:
+            # Put in the cancel queue and wait for the generation to resume
+            rollout_sample.agent_loop_output_list[request_index] = agent_loop_output
+            await self.cancel_queue.put([rollout_sample, request_index])
+        elif self.temp_rollout_samples[rollout_sample.sample_id][1] == self.config.actor_rollout_ref.rollout.n:
+            # put into the result_queue
+            rollout_sample = self.temp_rollout_samples[rollout_sample.sample_id][0]
+            rollout_sample.param_version = self.current_param_version
+            rollout_sample.rollout_status = await self.get_statistics()
+            await self.result_queue.put(rollout_sample)
+            del self.temp_rollout_samples[rollout_sample.sample_id]
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
@@ -589,12 +652,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 )
             return True
 
-        if self.staleness_samples >= self.max_required_samples:
+        if self.staleness_samples >= self.max_required_samples * self.config.actor_rollout_ref.rollout.n:
             if not self.paused:
                 print(
                     "[FullyAsyncRollouter][ShouldPause] "
                     f"due to "
-                    f"staleness_samples {self.staleness_samples} >= max_required_samples {self.max_required_samples} "
+                    f"staleness_samples {self.staleness_samples} >= max_required_samples {self.max_required_samples * self.config.actor_rollout_ref.rollout.n} "
                 )
             return True
 

@@ -68,6 +68,17 @@ class FullyAsyncAgentLoopOutput(AgentLoopOutput):
     """Number of assistant turns in the current conversation."""
     user_turns: int = 0
     """Number of user turns in the current conversation."""
+    is_processing_tools: bool = False
+    """Indicates whether the agent is waiting for processing tool calls."""
+    tool_call_names: Optional[list[str]] = None
+    is_interaction: bool = False
+    """Indicates whether the request is waiting for environment interaction."""
+    interaction_futures: Optional[list] = None
+    """Future for interaction tool calls."""
+    responses: Optional[list] = None
+    """Responses for interaction tool calls."""
+    request_id: Optional[str] = None
+    """Request ID. To make sure tool-call sample can be redirect to same sglang server."""
 
 
 @ray.remote
@@ -77,6 +88,52 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
     ):
         self.server_manager = FullyAsyncLLMServerManager(config, server_handles)
         super().__init__(config, server_handles, reward_router_address)
+
+    async def generate_sequences_single_request_no_post(
+        self, batch: DataProto, request_index: int, partial_output: Optional[AgentLoopOutput]
+    ) -> AgentLoopOutput:
+        """Generate sequences from agent loop.
+
+        Args:
+            batch (DataProto): Input batch.
+            request_index: index of the request in the batch.
+            partial_output: Optional[AgentLoopOutput]: already rollout result.
+
+        Returns:
+            FullyAsyncAgentLoopOutput: agent loop output, one per sample in the batch.
+        """
+        config = self.config.actor_rollout_ref.rollout
+        sampling_params = dict(
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=1.0,
+            logprobs=config.calculate_log_probs,
+        )
+
+        # override sampling params for validation
+        if batch.meta_info.get("validate", False):
+            sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["temperature"] = config.val_kwargs.temperature
+
+        # by default, we assume it's a single turn agent
+        if "agent_name" not in batch.non_tensor_batch:
+            batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(batch), dtype=object)
+
+        if "index" in batch.non_tensor_batch:
+            index = batch.non_tensor_batch["index"]
+        else:
+            index = np.arange(len(batch))
+
+        trajectory_info = await get_trajectory_info(
+            batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
+        )
+
+        if not partial_output:
+            partial_output = None
+
+        kwargs = {k: v[request_index] for k, v in batch.non_tensor_batch.items()}
+        kwargs["output"] = partial_output
+        return await asyncio.create_task(self._partial_run_agent_loop(sampling_params, trajectory_info[request_index], **kwargs))
 
     async def generate_sequences_no_post(
         self, batch: DataProto, partial_output_list: Optional[list[AgentLoopOutput]]
@@ -258,6 +315,27 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         worker = self._select_best_worker()
         output_future = worker.generate_sequences_no_post.remote(sample, partial_output_list)
         return await asyncio.wrap_future(output_future.future())
+    
+    async def generate_single_request_async(
+        self,
+        sample: DataProto,
+        request_index: int,
+        partial_output: Optional[AgentLoopOutput],
+    ) -> AgentLoopOutput:
+        """
+        Asynchronously process a single request
+
+        Args:
+            sample: Single sample data
+            partial_output: Optional[AgentLoopOutput]: already rollout result.
+
+        Returns:
+            AgentLoopOutput: Processing result
+        """
+        worker = self._select_best_worker()
+        output_future = worker.generate_sequences_single_request_no_post.remote(sample, request_index, partial_output)
+        output = await asyncio.wrap_future(output_future.future())
+        return output
 
     def _select_best_worker(self):
         """Select the best worker, simple round-robin load balancing"""
