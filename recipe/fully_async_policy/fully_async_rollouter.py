@@ -151,6 +151,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.active_tasks = set()
         self.result_queue = asyncio.Queue()
         self.cancel_queue = asyncio.Queue()
+        self.after_interaction_queue = asyncio.Queue()
 
         # temp rollout samples
         self.temp_rollout_samples: Dict[str, List] = {}
@@ -382,6 +383,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if not self.cancel_queue.empty():
                 rollout_sample, request_index = await self.cancel_queue.get()
                 simple_from_cancel_queue = True
+            elif not self.after_interaction_queue.empty():
+                rollout_sample, request_index = await self.after_interaction_queue.get()
+                simple_from_cancel_queue = True
             else:
                 rollout_sample = await self.pending_queue.get()
                 self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
@@ -451,7 +455,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if rollout_sample.sample_id not in self.temp_rollout_samples:
                 self.temp_rollout_samples[rollout_sample.sample_id] = [rollout_sample, 0]
             self.temp_rollout_samples[rollout_sample.sample_id][0].agent_loop_output_list[request_index] = agent_loop_output
-            self.temp_rollout_samples[rollout_sample.sample_id][1] += 1
 
         is_cancel = agent_loop_output.is_cancel
         is_processing_tools = agent_loop_output.is_processing_tools
@@ -461,13 +464,23 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Put in the cancel queue and wait for the generation to resume
             rollout_sample.agent_loop_output_list[request_index] = agent_loop_output
             await self.cancel_queue.put([rollout_sample, request_index])
-        elif self.temp_rollout_samples[rollout_sample.sample_id][1] == self.config.actor_rollout_ref.rollout.n:
-            # put into the result_queue
-            rollout_sample = self.temp_rollout_samples[rollout_sample.sample_id][0]
-            rollout_sample.param_version = self.current_param_version
-            rollout_sample.rollout_status = await self.get_statistics()
-            await self.result_queue.put(rollout_sample)
-            del self.temp_rollout_samples[rollout_sample.sample_id]
+        elif is_processing_tools or is_interaction:
+            interaction_futures = agent_loop_output.interaction_futures
+            responses = await asyncio.gather(*interaction_futures)
+            # after processing tools, put into after_interaction_queue
+            agent_loop_output.responses = responses
+            rollout_sample.agent_loop_output_list[request_index] = agent_loop_output
+            await self.after_interaction_queue.put([rollout_sample, request_index])
+        else:
+            async with self.temp_rollout_samples_lock:
+                self.temp_rollout_samples[rollout_sample.sample_id][1] += 1
+            if self.temp_rollout_samples[rollout_sample.sample_id][1] == self.config.actor_rollout_ref.rollout.n:
+                # put into the result_queue
+                rollout_sample = self.temp_rollout_samples[rollout_sample.sample_id][0]
+                rollout_sample.param_version = self.current_param_version
+                rollout_sample.rollout_status = await self.get_statistics()
+                await self.result_queue.put(rollout_sample)
+                del self.temp_rollout_samples[rollout_sample.sample_id]
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
