@@ -42,9 +42,10 @@ class AgentState(Enum):
     GENERATING = "generating"
     PROCESSING_TOOLS = "processing_tools"
     TERMINATED = "terminated"
-    AFTER_PROCESSING_TOOLS = "after_processing_tools"
-    AFTER_INTERACTING = "after_interacting"
+    BEFORE_PROCESSING_TOOLS = "before_processing_tools"
+    BEFORE_INTERACTING = "before_interacting"
     INTERACTING = "interacting"
+    AFTER_INTERACTING = "after_interacting"
     ABORTED = "aborted"
 
 
@@ -90,8 +91,8 @@ class FullyAsyncAgentData:
         self.param_version_start: int = param_version_start
         self.param_version_end: int = param_version_end
 
-        # Futures for interaction tool calls
-        self.interaction_futures: Optional[list[asyncio.Future]] = None
+        # Interaction tool calls
+        self.tool_calls: Optional[list[FunctionCall]] = None
 
         # Responses for interaction tool calls
         self.responses: Optional[list] = None
@@ -183,8 +184,8 @@ class PartialToolAgentLoop(AgentLoopBase):
                 state = await self._handle_pending_state(agent_data, sampling_params)
             elif state == AgentState.GENERATING:
                 state = await self._handle_generating_state(agent_data, sampling_params)
-            elif state == AgentState.PROCESSING_TOOLS or state == AgentState.INTERACTING:
-                state = await self._handle_environment_interaction(agent_data)
+            elif state == AgentState.BEFORE_PROCESSING_TOOLS or state == AgentState.BEFORE_INTERACTING:
+                # state = await self._handle_environment_interaction(agent_data)
                 # Directly return and set is_processing_tools to True
                 response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
                 multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
@@ -201,10 +202,10 @@ class PartialToolAgentLoop(AgentLoopBase):
                     num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
                     metrics=agent_data.metrics,
                     extra_fields={},
-                    is_processing_tools=True if state == AgentState.PROCESSING_TOOLS else False,
-                    is_interaction=True if state == AgentState.INTERACTING else False,
-                    tool_call_names=agent_data.tool_call_names,
-                    interaction_futures=agent_data.interaction_futures,
+                    is_processing_tools=True if state == AgentState.BEFORE_PROCESSING_TOOLS else False,
+                    is_interaction=True if state == AgentState.BEFORE_INTERACTING else False,
+                    tool_calls=agent_data.tool_calls if state == AgentState.BEFORE_PROCESSING_TOOLS else None,
+                    messages=agent_data.messages,
                     log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
                     param_version_start=agent_data.param_version_start,
                     param_version_end=agent_data.param_version_end,
@@ -212,10 +213,34 @@ class PartialToolAgentLoop(AgentLoopBase):
                 )
                 output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
                 return output
-            elif state == AgentState.AFTER_PROCESSING_TOOLS:
+            elif state == AgentState.PROCESSING_TOOLS:
                 state = await self._handle_processing_tools_state(agent_data)
-            elif state == AgentState.AFTER_INTERACTING:
+            elif state == AgentState.INTERACTING:
                 state = await self._handle_interacting_state(agent_data)
+            elif state == AgentState.AFTER_INTERACTING:
+                response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
+                multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
+                output = FullyAsyncAgentLoopOutput(
+                    prompt_ids=agent_data.prompt_ids,
+                    response_ids=response_ids[: self.response_length],
+                    response_mask=agent_data.response_mask[: self.response_length],
+                    multi_modal_data=multi_modal_data,
+                    response_logprobs=agent_data.response_logprobs[: self.response_length]
+                    if agent_data.response_logprobs
+                    else None,
+                    assistant_turns=agent_data.assistant_turns,
+                    user_turns=agent_data.user_turns,
+                    num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
+                    metrics=agent_data.metrics,
+                    extra_fields={},
+                    is_after_interacting=True,
+                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+                    param_version_start=agent_data.param_version_start,
+                    param_version_end=agent_data.param_version_end,
+                    request_id=agent_data.request_id,
+                )
+                output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+                return output
             elif state == AgentState.ABORTED:
                 # Handle aborted sample
                 response_ids = agent_data.prompt_ids[-len(agent_data.response_mask) :]
@@ -295,11 +320,11 @@ class PartialToolAgentLoop(AgentLoopBase):
                     ),
                 )
         else:
-            if agent_data.output.is_cancel or agent_data.output.is_interaction or agent_data.output.is_processing_tools:
+            if agent_data.output.is_cancel or agent_data.output.is_interaction or agent_data.output.is_processing_tools or agent_data.output.is_after_interacting:
                 # Resume the paused sample,
                 # add the result directly after prompt_ids,
                 # and reset generate_sequences metric
-                agent_data.prompt_ids = agent_data.output.prompt_ids + agent_data.output.response_ids
+                agent_data.prompt_ids = agent_data.output.prompt_ids
                 agent_data.metrics["generate_sequences"] = agent_data.output.metrics.generate_sequences
                 agent_data.param_version_start = agent_data.output.param_version_start
                 agent_data.response_mask = agent_data.output.response_mask
@@ -309,14 +334,15 @@ class PartialToolAgentLoop(AgentLoopBase):
                 agent_data.turn_scores = agent_data.output.extra_fields.get("turn_scores", [])
                 agent_data.tool_rewards = agent_data.output.extra_fields.get("tool_rewards", [])
                 if agent_data.output.is_interaction:
-                    agent_data.responses = agent_data.output.responses
+                    agent_data.messages = agent_data.output.messages
                     agent_data.request_id = agent_data.output.request_id
-                    return AgentState.AFTER_INTERACTING
+                    return AgentState.INTERACTING
                 elif agent_data.output.is_processing_tools:
-                    agent_data.responses = agent_data.output.responses
-                    agent_data.tool_call_names = agent_data.output.tool_call_names
+                    agent_data.tool_calls = agent_data.output.tool_calls
                     agent_data.request_id = agent_data.output.request_id
-                    return AgentState.AFTER_PROCESSING_TOOLS
+                    return AgentState.PROCESSING_TOOLS
+                elif agent_data.output.is_after_interacting:
+                    agent_data.request_id = agent_data.output.request_id
             else:
                 # In the same batch of samples,
                 # some are canceled and some are not.
@@ -373,42 +399,25 @@ class PartialToolAgentLoop(AgentLoopBase):
 
         # Determine next state
         if agent_data.tool_calls:
-            return AgentState.PROCESSING_TOOLS
+            return AgentState.BEFORE_PROCESSING_TOOLS
         elif self.interaction_config_file:
-            return AgentState.INTERACTING
+            return AgentState.BEFORE_INTERACTING
         else:
             return AgentState.TERMINATED
-
-    async def _handle_environment_interaction(self, agent_data: FullyAsyncAgentData) -> AgentState:
-        """Handle interaction tool calls and buffer tool-call future"""
-        if agent_data.state == AgentState.PROCESSING_TOOLS:
-            tasks = []
-            tool_call_names = []
-            for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
-                tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs))
-                tool_call_names.append(tool_call.name)
-                
-            agent_data.interaction_futures = tasks
-            agent_data.tool_call_names = tool_call_names
-            
-        elif agent_data.state == AgentState.INTERACTING:
-            tasks = []
-            tasks.append(agent_data.interaction.generate_response(agent_data.request_id, 
-                                                                  agent_data.messages, 
-                                                                  **agent_data.interaction_kwargs))
-            agent_data.interaction_futures = tasks
-        else:
-            raise ValueError(f"Invalid state for interaction tool calls: {agent_data.state}")
-        
-        return agent_data.state
 
     async def _handle_processing_tools_state(self, agent_data: FullyAsyncAgentData) -> AgentState:
         """Handle the processing tools state: execute tool calls and prepare tool responses."""
         add_messages: list[dict[str, Any]] = []
         new_images_this_turn: list[Any] = []  # Local variable instead of agent_data attribute
 
-        responses = agent_data.responses
-        tool_call_names = agent_data.tool_call_names
+        tasks = []
+        tool_call_names = []
+        for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
+            tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs))
+            tool_call_names.append(tool_call.name)
+
+        with simple_timer("tool_calls", agent_data.metrics):
+            responses = await asyncio.gather(*tasks)
 
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
@@ -511,7 +520,7 @@ class PartialToolAgentLoop(AgentLoopBase):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
-        return AgentState.GENERATING
+        return AgentState.AFTER_INTERACTING
 
     async def _handle_interacting_state(self, agent_data: FullyAsyncAgentData) -> AgentState:
         """Handle the interacting state: get user input from interaction."""
@@ -520,7 +529,9 @@ class PartialToolAgentLoop(AgentLoopBase):
             interaction_responses,
             reward,
             metrics,
-        ) = agent_data.responses[0]
+        ) = await agent_data.interaction.generate_response(
+            agent_data.request_id, agent_data.messages, **agent_data.interaction_kwargs
+        )
         agent_data.user_turns += 1
 
         add_messages: list[dict[str, Any]] = [{"role": "user", "content": interaction_responses}]
@@ -560,7 +571,7 @@ class PartialToolAgentLoop(AgentLoopBase):
         if should_terminate_sequence:
             return AgentState.TERMINATED
         else:
-            return AgentState.GENERATING
+            return AgentState.AFTER_INTERACTING
 
     async def _call_tool(
         self, tool_call: FunctionCall, tools_kwargs: dict[str, Any]

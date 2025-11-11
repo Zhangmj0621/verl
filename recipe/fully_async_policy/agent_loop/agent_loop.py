@@ -35,6 +35,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.utils.rollout_trace import rollout_trace_attr
 from verl.workers.rollout.replica import TokenOutput
+from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -70,13 +71,14 @@ class FullyAsyncAgentLoopOutput(AgentLoopOutput):
     """Number of user turns in the current conversation."""
     is_processing_tools: bool = False
     """Indicates whether the agent is waiting for processing tool calls."""
-    tool_call_names: Optional[list[str]] = None
+    tool_calls: Optional[list[FunctionCall]] = None
+    """Tool call details."""
     is_interaction: bool = False
     """Indicates whether the request is waiting for environment interaction."""
-    interaction_futures: Optional[list] = None
-    """Future for interaction tool calls."""
-    responses: Optional[list] = None
-    """Responses for interaction tool calls."""
+    messages: Optional[list[dict[str, Any]]] = None
+    """Messages for interaction tool calls."""
+    is_after_interacting: bool = False
+    """Indicates whether the request has completed environment interaction."""
     request_id: Optional[str] = None
     """Request ID. To make sure tool-call sample can be redirect to same sglang server."""
 
