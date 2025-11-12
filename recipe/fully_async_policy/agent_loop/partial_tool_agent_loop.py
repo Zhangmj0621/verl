@@ -196,7 +196,7 @@ class PartialToolAgentLoop(AgentLoopBase):
                     multi_modal_data=multi_modal_data,
                     response_logprobs=agent_data.response_logprobs[: self.response_length]
                     if agent_data.response_logprobs
-                    else None,
+                    else [],
                     assistant_turns=agent_data.assistant_turns,
                     user_turns=agent_data.user_turns,
                     num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
@@ -206,7 +206,7 @@ class PartialToolAgentLoop(AgentLoopBase):
                     is_interaction=True if state == AgentState.BEFORE_INTERACTING else False,
                     tool_calls=agent_data.tool_calls if state == AgentState.BEFORE_PROCESSING_TOOLS else None,
                     messages=agent_data.messages,
-                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
                     param_version_start=agent_data.param_version_start,
                     param_version_end=agent_data.param_version_end,
                     request_id=agent_data.request_id,
@@ -227,14 +227,14 @@ class PartialToolAgentLoop(AgentLoopBase):
                     multi_modal_data=multi_modal_data,
                     response_logprobs=agent_data.response_logprobs[: self.response_length]
                     if agent_data.response_logprobs
-                    else None,
+                    else [],
                     assistant_turns=agent_data.assistant_turns,
                     user_turns=agent_data.user_turns,
                     num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
                     metrics=agent_data.metrics,
                     extra_fields={},
                     is_after_interacting=True,
-                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
                     param_version_start=agent_data.param_version_start,
                     param_version_end=agent_data.param_version_end,
                     request_id=agent_data.request_id,
@@ -252,14 +252,14 @@ class PartialToolAgentLoop(AgentLoopBase):
                     multi_modal_data=multi_modal_data,
                     response_logprobs=agent_data.response_logprobs[: self.response_length]
                     if agent_data.response_logprobs
-                    else None,
+                    else [],
                     assistant_turns=agent_data.assistant_turns,
                     user_turns=agent_data.user_turns,
                     num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
                     metrics=agent_data.metrics,
                     extra_fields={},
                     is_cancel=True,
-                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
                     param_version_start=agent_data.param_version_start,
                     param_version_end=agent_data.param_version_end,
                 )
@@ -280,14 +280,14 @@ class PartialToolAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
-            else None,
+            else [],
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},
             is_cancel=False,
             param_version_start=agent_data.param_version_start,
             param_version_end=agent_data.param_version_end,
-            log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+            log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output

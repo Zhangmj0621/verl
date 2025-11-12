@@ -353,8 +353,11 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 )
                 async with self.lock:
                     self.paused = True
-                await self._pause_worker()
-
+                try:
+                    await self._pause_worker()
+                except Exception as e:
+                    raise RuntimeError(f"Exception occurred while pausing worker: {e}")
+                
                 async with self.lock:
                     while self.paused:
                         self.idle_start_time = time.time()
@@ -370,15 +373,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 rollout_sample, request_index = await self.cancel_queue.get()
                 simple_from_cancel_queue = True
             else:
-                rollout_sample = await self.pending_queue.get()
-                self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
-
-            if not simple_from_cancel_queue and rollout_sample == "DONE":
-                print(
-                    "[FullyAsyncRollouter][Processor] Received end signal, waiting for remaining tasks to complete..."
-                )
-                await self._pause_worker()
-                break
+                pass
+                # rollout_sample = await self.pending_queue.get()
+                # self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
 
             slot = 1 if simple_from_cancel_queue or simple_from_after_interaction_queue else self.config.actor_rollout_ref.rollout.n
             # Check whether the number of concurrent tasks exceeds the limit
@@ -392,10 +389,22 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         await task
 
                 # double check if there are interaction_tasks can be used
-                if not self.after_interaction_queue.empty():
-                    rollout_sample, request_index = await self.after_interaction_queue.get()
-                    simple_from_after_interaction_queue = True
-                    slot = 1
+                if slot != 1:
+                    if not self.after_interaction_queue.empty():
+                        rollout_sample, request_index = await self.after_interaction_queue.get()
+                        simple_from_after_interaction_queue = True
+                        slot = 1
+
+            if not simple_from_cancel_queue and not simple_from_after_interaction_queue:
+                rollout_sample = await self.pending_queue.get()
+                self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
+
+            if not simple_from_cancel_queue and rollout_sample == "DONE":
+                print(
+                    "[FullyAsyncRollouter][Processor] Received end signal, waiting for remaining tasks to complete..."
+                )
+                await self._pause_worker()
+                break
 
             # Submit single sample processing
             async with self.lock:
@@ -416,8 +425,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                             self._process_single_request_streaming(copy.deepcopy(rollout_sample), request_index),
                             name=f"{rollout_sample.sample_id}:{request_index}",
                         )
-                        self.active_tasks.add(task)
                         setattr(task, "_kind", "active_task")
+                        self.active_tasks.add(task)
 
             if simple_from_cancel_queue:
                 self.cancel_queue.task_done()
@@ -436,8 +445,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             rollout_sample, request_index = await self.before_interaction_queue.get()
             async with self.lock:
                 task = asyncio.create_task(self._process_single_request_streaming(rollout_sample, request_index))
-                self.interaction_tasks.add(task)
                 setattr(task, "_kind", "interaction_task")
+                self.interaction_tasks.add(task)
             self.before_interaction_queue.task_done()
 
     async def _process_single_request_streaming(self, rollout_sample: RolloutSample, request_index: int):
@@ -522,12 +531,17 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     all_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in done:
-                    await task
-                    if getattr(task, "_kind", None) == "active_task":
-                        self.active_tasks.remove(task)
-                    elif getattr(task, "_kind", None) == "interaction_task":
-                        self.interaction_tasks.remove(task)
-                
+                    try:
+                        await task
+                    except Exception as e:
+                        raise RuntimeError(f"Exception in task {task.get_name()}: {e}")
+                    finally:
+                        kind = getattr(task, "_kind", None)
+                        if kind == "active_task":
+                            self.active_tasks.discard(task)
+                        elif kind == "interaction_task":
+                            self.interaction_tasks.discard(task)
+
                 # put all tasks from after_interaction_queue to active_tasks
                 while not self.after_interaction_queue.empty():
                     rollout_sample, request_index = await self.after_interaction_queue.get()
@@ -537,7 +551,34 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     )
                     setattr(task, "_kind", "active_task")
                     self.active_tasks.add(task)
-                    self.after_interaction_queue.task_done()       
+                    self.after_interaction_queue.task_done()
+
+    async def _pause_worker_v2(self):
+        """
+        Pause worker coroutine, only put tasks from interaction_tasks to active_tasks continuously
+        """
+        while self.active_tasks or self.interaction_tasks:
+            all_tasks = self.active_tasks | self.interaction_tasks
+            done, pending = await asyncio.wait(
+                all_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                await task
+                if getattr(task, "_kind", None) == "active_task":
+                    self.active_tasks.remove(task)
+                elif getattr(task, "_kind", None) == "interaction_task":
+                    self.interaction_tasks.remove(task)
+
+            # put all tasks from after_interaction_queue to active_tasks
+            while not self.after_interaction_queue.empty():
+                rollout_sample, request_index = await self.after_interaction_queue.get()
+                task = asyncio.create_task(
+                    self._process_single_request_streaming(rollout_sample, request_index),
+                    name=f"{rollout_sample.sample_id}:{request_index}",
+                )
+                setattr(task, "_kind", "active_task")
+                self.active_tasks.add(task)
+                self.after_interaction_queue.task_done()       
 
     async def _consumer_worker(self):
         """
@@ -716,7 +757,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if self.config.async_training.partial_rollout:
                 await self.async_rollout_manager.cancel()
             if self.active_tasks or self.interaction_tasks:
-                await self._pause_worker()
+                await self._pause_worker_v2()
                 # await asyncio.gather(*self.active_tasks, return_exceptions=True)
                 self.active_tasks.clear()
                 self.interaction_tasks.clear()
