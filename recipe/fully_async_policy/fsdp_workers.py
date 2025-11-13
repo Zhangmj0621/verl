@@ -44,7 +44,7 @@ import threading
 from typing import Coroutine, Any
 
 
-def run_async_in_sync(coro: Coroutine) -> Any:
+def run_async_in_sync2(coro: Coroutine) -> Any:
     result = None
     exception = None
     event = threading.Event()
@@ -73,6 +73,16 @@ def run_async_in_sync(coro: Coroutine) -> Any:
         raise exception
 
     return result
+
+
+def run_async_in_sync(coro: Coroutine):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 def get_inference_model(rollout):
@@ -138,7 +148,6 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                     coroutine_to_run = self.rollout.update_weights(single_item_generator)
                     run_async_in_sync(coroutine_to_run)
         get_torch_device().empty_cache()
-
 
 
 class DetachActorWorker(DetachNcclSync):
