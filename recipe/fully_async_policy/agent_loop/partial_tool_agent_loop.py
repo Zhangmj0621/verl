@@ -281,6 +281,8 @@ class PartialToolAgentLoop(AgentLoopBase):
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
             else [],
+            assistant_turns=agent_data.assistant_turns,
+            user_turns=agent_data.user_turns,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},
