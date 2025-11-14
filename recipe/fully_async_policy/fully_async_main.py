@@ -159,7 +159,7 @@ class FullyAsyncTaskRunner:
         self.components["role_worker_mapping"] = role_worker_mapping
         self.components["ray_worker_group_cls"] = ray_worker_group_cls
 
-        print("[ASYNC MAIN] Loading reward functions...")
+        '''print("[ASYNC MAIN] Loading reward functions...")
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
         )
@@ -167,7 +167,7 @@ class FullyAsyncTaskRunner:
             config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
         )
         self.components["reward_fn"] = reward_fn
-        self.components["val_reward_fn"] = val_reward_fn
+        self.components["val_reward_fn"] = val_reward_fn'''
 
         print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
@@ -203,7 +203,7 @@ class FullyAsyncTaskRunner:
         ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
 
         # load checkpoint and sync parameter before doing anything
-        val_before_train = val_reward_fn is not None and config.trainer.get("val_before_train", True)
+        val_before_train = config.trainer.get("val_before_train", True)
         ray.get(self.components["trainer"].load_checkpoint.remote())
         ray.get(param_synchronizer.sync_weights.remote(version=0, validate=val_before_train))
         ray.get(param_synchronizer.wait_last_valid.remote())
@@ -219,8 +219,6 @@ class FullyAsyncTaskRunner:
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
-            reward_fn=self.components["reward_fn"],
-            val_reward_fn=self.components["val_reward_fn"],
             device_name=config.trainer.device,
         )
 
@@ -244,8 +242,6 @@ class FullyAsyncTaskRunner:
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
             ray_worker_group_cls=self.components["ray_worker_group_cls"],
             processor=self.components["processor"],
-            reward_fn=self.components["reward_fn"],
-            val_reward_fn=self.components["val_reward_fn"],
             device_name=config.trainer.device,
         )
 
