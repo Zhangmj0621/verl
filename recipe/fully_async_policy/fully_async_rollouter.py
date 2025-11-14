@@ -415,6 +415,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 while len(self.active_tasks) + len(self.interaction_tasks) >= self.max_concurrent_requests - slot + 1:
                     async with self.lock:
                         all_tasks = self.active_tasks | self.interaction_tasks
+                        if not all_tasks:
+                            break
                         done, pending = await asyncio.wait(
                             all_tasks, return_when=asyncio.FIRST_COMPLETED
                         )
