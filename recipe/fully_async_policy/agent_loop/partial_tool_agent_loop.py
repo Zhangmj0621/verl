@@ -347,6 +347,15 @@ class PartialToolAgentLoop(AgentLoopBase):
                 # In the same batch of samples,
                 # some are canceled and some are not.
                 # The samples without partial rollout are returned directly.
+                agent_data.prompt_ids = agent_data.output.prompt_ids
+                agent_data.metrics["generate_sequences"] = agent_data.output.metrics.generate_sequences
+                agent_data.param_version_start = agent_data.output.param_version_start
+                agent_data.response_mask = agent_data.output.response_mask
+                agent_data.response_logprobs = agent_data.output.response_logprobs
+                agent_data.assistant_turns = agent_data.output.assistant_turns
+                agent_data.user_turns = agent_data.output.user_turns
+                agent_data.turn_scores = agent_data.output.extra_fields.get("turn_scores", [])
+                agent_data.tool_rewards = agent_data.output.extra_fields.get("tool_rewards", [])
                 return AgentState.TERMINATED
 
         agent_data.output = None  # Clear output after resuming
