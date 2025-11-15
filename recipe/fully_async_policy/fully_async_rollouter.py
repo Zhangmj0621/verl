@@ -362,7 +362,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     await self._pause_worker()
                 except Exception as e:
                     raise RuntimeError(f"Exception occurred while pausing worker: {e}")
-                
+
                 async with self.lock:
                     while self.paused:
                         self.idle_start_time = time.time()
@@ -530,8 +530,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         Pause worker coroutine, only put tasks from interaction_tasks to active_tasks continuously
         """
         while self.active_tasks or self.interaction_tasks:
-            all_tasks = self.active_tasks | self.interaction_tasks
             async with self.lock:
+                all_tasks = self.active_tasks | self.interaction_tasks
+                if not all_tasks:
+                    break
                 done, pending = await asyncio.wait(
                     all_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -564,6 +566,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         """
         while self.active_tasks or self.interaction_tasks:
             all_tasks = self.active_tasks | self.interaction_tasks
+            if not all_tasks:
+                break
             done, pending = await asyncio.wait(
                 all_tasks, return_when=asyncio.FIRST_COMPLETED
             )
