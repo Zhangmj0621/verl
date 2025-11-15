@@ -150,6 +150,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # Initialize async locks directly
         self.lock = asyncio.Lock()
         self.condition = asyncio.Condition(self.lock)
+        self.sample_in_system = 0
 
         # Initialize async queues
         self.pending_queue = asyncio.Queue(maxsize=128)
@@ -391,7 +392,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             slot = 1 if simple_from_cancel_queue or simple_from_after_interaction_queue else self.config.actor_rollout_ref.rollout.n
             # Check whether the number of concurrent tasks exceeds the limit
             # If staleness sample haven't exceed batchsize_samples, prefer to process new samples from pending_queue
-            if self.staleness_samples < self.batchsize_samples or simple_from_cancel_queue or simple_from_after_interaction_queue:
+            if simple_from_cancel_queue or simple_from_after_interaction_queue:
                 while len(self.active_tasks) >= self.max_concurrent_requests - slot + 1:
                     async with self.lock:
                         if self.active_tasks:
@@ -413,26 +414,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
             else:
                 # Need to wait before active_tasks and interaction_tasks less than threshold
-                while len(self.active_tasks) + len(self.interaction_tasks) >= self.max_concurrent_requests - slot + 1:
-                    async with self.lock:
-                        all_tasks = self.active_tasks | self.interaction_tasks
-                        if not all_tasks:
-                            break
-                        done, pending = await asyncio.wait(
-                            all_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for task in done:
-                            try:
-                                await task
-                            except Exception as e:
-                                print(f"[FullyAsyncRollouter][Processor] Task exception: {e}")
-                            finally:
-                                kind = getattr(task, "_kind", None)
-                                if kind == "active_task":
-                                    self.active_tasks.discard(task)
-                                elif kind == "interaction_task":
-                                    self.interaction_tasks.discard(task)
-                    
+                # Need to wait for samples completed instead of requests
+                while self.sample_in_system >= self.max_concurrent_samples:  
                     if not self.after_interaction_queue.empty():
                         rollout_sample, request_index = await self.after_interaction_queue.get()
                         simple_from_after_interaction_queue = True
@@ -481,6 +464,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         )
                         setattr(task, "_kind", "active_task")
                         self.active_tasks.add(task)
+                    self.sample_in_system += 1
 
             if simple_from_cancel_queue:
                 self.cancel_queue.task_done()
@@ -546,6 +530,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 rollout_sample.rollout_status = await self.get_statistics()
                 await self.result_queue.put(rollout_sample)
                 del self.temp_rollout_samples[rollout_sample.sample_id]
+                self.sample_in_system -= 1
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
