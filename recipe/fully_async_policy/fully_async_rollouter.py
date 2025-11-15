@@ -185,6 +185,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 self.required_samples
                 * 1
                 * self.config.async_training.trigger_parameter_sync_step
+                * self.config.actor_rollout_ref.rollout.n
             )
             self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
@@ -580,6 +581,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         while self.active_tasks or self.interaction_tasks:
             async with self.lock:
                 all_tasks = self.active_tasks | self.interaction_tasks
+                if not all_tasks:
+                    break
                 done, pending = await asyncio.wait(
                     all_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -612,6 +615,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         """
         while self.active_tasks or self.interaction_tasks:
             all_tasks = self.active_tasks | self.interaction_tasks
+            if not all_tasks:
+                break
             done, pending = await asyncio.wait(
                 all_tasks, return_when=asyncio.FIRST_COMPLETED
             )
