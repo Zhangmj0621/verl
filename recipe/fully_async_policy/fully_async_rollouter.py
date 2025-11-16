@@ -415,13 +415,25 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             else:
                 # Need to wait before active_tasks and interaction_tasks less than threshold
                 # Need to wait for samples completed instead of requests
-                while self.sample_in_system >= self.max_concurrent_samples:  
+                temp_sample_cnt = self.sample_in_system
+                while temp_sample_cnt >= self.max_concurrent_samples:
+                    async with self.lock:
+                        if self.active_tasks:
+                            done_tasks, self.active_tasks = await asyncio.wait(
+                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        else:
+                            break
+                        for task in done_tasks:
+                            await task
+
                     if not self.after_interaction_queue.empty():
                         rollout_sample, request_index = await self.after_interaction_queue.get()
                         simple_from_after_interaction_queue = True
                         slot = 1
                         break
-                
+                    temp_sample_cnt = self.sample_in_system
+
                 if slot == 1:
                     # need to check if active_tasks less than threshold
                     while len(self.active_tasks) >= self.max_concurrent_requests - slot + 1:
@@ -530,7 +542,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 rollout_sample.rollout_status = await self.get_statistics()
                 await self.result_queue.put(rollout_sample)
                 del self.temp_rollout_samples[rollout_sample.sample_id]
-                self.sample_in_system -= 1
+                async with self.lock:
+                    self.sample_in_system -= 1
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
