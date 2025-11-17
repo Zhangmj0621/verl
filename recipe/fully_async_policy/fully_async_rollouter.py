@@ -14,7 +14,7 @@
 import asyncio
 import time
 from pprint import pformat
-from typing import Coroutine, Any, Tuple, List, Dict
+from typing import Coroutine, Any, Tuple, List, Dict, Optional
 import copy
 
 import ray
@@ -163,6 +163,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # temp rollout samples
         self.temp_rollout_samples: Dict[str, List] = {}
         self.temp_rollout_samples_lock = asyncio.Lock()
+
+        self.using_rollout_sample = None
+        self.using_sample_index = 0
 
     async def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -382,27 +385,59 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 # rollout_sample = await self.pending_queue.get()
                 # self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
 
-            slot = 1 if simple_from_cancel_queue or simple_from_after_interaction_queue else self.config.actor_rollout_ref.rollout.n
             # Check whether the number of concurrent tasks exceeds the limit
-            while len(self.active_tasks) >= self.max_concurrent_requests - slot + 1:
-                async with self.lock:
-                    if self.active_tasks:
-                        done_tasks, self.active_tasks = await asyncio.wait(
-                            self.active_tasks, return_when=asyncio.FIRST_COMPLETED
-                        )
-                    for task in done_tasks:
-                        await task
+            if simple_from_after_interaction_queue or simple_from_cancel_queue:
+                while len(self.active_tasks) >= self.max_concurrent_requests:
+                    async with self.lock:
+                        if self.active_tasks:
+                            done_tasks, self.active_tasks = await asyncio.wait(
+                                self.active_tasks, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        for task in done_tasks:
+                            await task
 
-                # double check if there are interaction_tasks can be used
-                if slot != 1:
+                    # double check if there are interaction_tasks can be used
                     if not self.after_interaction_queue.empty():
                         rollout_sample, request_index = await self.after_interaction_queue.get()
                         simple_from_after_interaction_queue = True
-                        slot = 1
+            else:
+                while len(self.active_tasks) + len(self.interaction_tasks) >= self.max_concurrent_requests:
+                    async with self.lock:
+                        all_tasks = self.active_tasks | self.interaction_tasks
+                        if all_tasks:
+                            done, pending = await asyncio.wait(
+                                all_tasks, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            for task in done:
+                                try:
+                                    await task
+                                except Exception as e:
+                                    raise RuntimeError(f"Exception in task {task.get_name()}: {e}")
+                                finally:
+                                    kind = getattr(task, "_kind", None)
+                                    if kind == "active_task":
+                                        self.active_tasks.discard(task)
+                                    elif kind == "interaction_task":
+                                        self.interaction_tasks.discard(task)
+
+                    # double check if there are interaction_tasks can be used
+                    if not self.after_interaction_queue.empty():
+                        rollout_sample, request_index = await self.after_interaction_queue.get()
+                        simple_from_after_interaction_queue = True
 
             if not simple_from_cancel_queue and not simple_from_after_interaction_queue:
-                rollout_sample = await self.pending_queue.get()
-                self.staleness_samples += 1 * self.config.actor_rollout_ref.rollout.n
+                request_index = self.using_sample_index
+                if self.using_sample_index == 0:
+                    rollout_sample = await self.pending_queue.get()
+                    self.staleness_samples += 1
+                    self.using_rollout_sample = copy.deepcopy(rollout_sample)
+                    self.using_sample_index += 1
+                elif self.using_sample_index == self.config.actor_rollout_ref.rollout.n - 1:
+                    self.using_sample_index = 0
+                    rollout_sample = copy.deepcopy(self.using_rollout_sample)
+                else:
+                    rollout_sample = copy.deepcopy(self.using_rollout_sample)
+                    self.using_sample_index += 1
 
             if not simple_from_cancel_queue and rollout_sample == "DONE":
                 print(
@@ -417,21 +452,12 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 # to determine whether it is the pause phase, otherwise continue to wait
                 while self.paused:
                     await self.condition.wait()
-                if simple_from_cancel_queue or simple_from_after_interaction_queue:
-                    task = asyncio.create_task(
-                        self._process_single_request_streaming(rollout_sample, request_index),
-                        name=f"{rollout_sample.sample_id}:{request_index}",
-                    )
-                    setattr(task, "_kind", "active_task")
-                    self.active_tasks.add(task)
-                else:
-                    for request_index in range(self.config.actor_rollout_ref.rollout.n):
-                        task = asyncio.create_task(
-                            self._process_single_request_streaming(copy.deepcopy(rollout_sample), request_index),
-                            name=f"{rollout_sample.sample_id}:{request_index}",
-                        )
-                        setattr(task, "_kind", "active_task")
-                        self.active_tasks.add(task)
+                task = asyncio.create_task(
+                    self._process_single_request_streaming(rollout_sample, request_index),
+                    name=f"{rollout_sample.sample_id}:{request_index}",
+                )
+                setattr(task, "_kind", "active_task")
+                self.active_tasks.add(task)
 
             if simple_from_cancel_queue:
                 self.cancel_queue.task_done()
