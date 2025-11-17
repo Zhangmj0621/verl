@@ -59,6 +59,7 @@ class FullyAsyncAgentData:
         metrics: dict[str, Any],
         request_id: str,
         tools_kwargs: dict[str, Any],
+        server_index: int = 0,
         interaction: Optional[BaseInteraction] = None,
         interaction_kwargs: Optional[dict[str, Any]] = None,
         param_version_start: int = 0,
@@ -97,6 +98,8 @@ class FullyAsyncAgentData:
         # Responses for interaction tool calls
         self.responses: Optional[list] = None
         self.tool_call_names: Optional[list[str]] = None
+        
+        self.server_index: int = server_index
 
 
 @register("partial_tool_agent")
@@ -144,6 +147,7 @@ class PartialToolAgentLoop(AgentLoopBase):
         tools_kwargs = kwargs.get("tools_kwargs", {})
         output: Optional[FullyAsyncAgentLoopOutput] = kwargs.get("output", None)
         param_version = kwargs.get("param_version", 0)
+        server_index = kwargs.get("server_index", 0)
 
         # Initialize interaction if needed
         interaction = None
@@ -175,6 +179,7 @@ class PartialToolAgentLoop(AgentLoopBase):
             param_version_start=param_version_start,
             param_version_end=param_version_end,
             output=output,
+            server_index=server_index,
         )
 
         # State machine loop
@@ -375,6 +380,7 @@ class PartialToolAgentLoop(AgentLoopBase):
                 request_id=agent_data.request_id, 
                 prompt_ids=agent_data.prompt_ids, 
                 sampling_params=sampling_params,
+                server_index=agent_data.server_index,
                 image_data=agent_data.image_data,
             )
 

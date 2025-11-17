@@ -42,9 +42,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FullyAsyncLLMServerManager(AsyncLLMServerManager):
-    async def generate_for_partial(self, request_id, prompt_ids, sampling_params, image_data=None) -> TokenOutput:
+    async def generate_for_partial(self, request_id, prompt_ids, sampling_params, server_index: int, image_data=None) -> TokenOutput:
         """Generate tokens from prompt ids. with partial rollout function"""
-        server = self._choose_server(request_id)
+        server = self.server_handles[server_index]
         output = await server.generate_for_partial.remote(
             request_id=request_id,
             prompt_ids=prompt_ids,
@@ -92,7 +92,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
         super().__init__(config, server_handles, reward_router_address)
 
     async def generate_sequences_single_request_no_post(
-        self, batch: DataProto, request_index: int, partial_output: Optional[AgentLoopOutput]
+        self, batch: DataProto, request_index: int, server_index: int, partial_output: Optional[AgentLoopOutput]
     ) -> AgentLoopOutput:
         """Generate sequences from agent loop.
 
@@ -135,6 +135,7 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
 
         kwargs = {k: v[request_index] for k, v in batch.non_tensor_batch.items()}
         kwargs["output"] = partial_output
+        kwargs["server_index"] = server_index
         return await asyncio.create_task(self._partial_run_agent_loop(sampling_params, trajectory_info[request_index], **kwargs))
 
     async def generate_sequences_no_post(
@@ -322,6 +323,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         self,
         sample: DataProto,
         request_index: int,
+        server_index: int,
         partial_output: Optional[AgentLoopOutput],
     ) -> AgentLoopOutput:
         """
@@ -335,7 +337,7 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
             AgentLoopOutput: Processing result
         """
         worker = self._select_best_worker()
-        output_future = worker.generate_sequences_single_request_no_post.remote(sample, request_index, partial_output)
+        output_future = worker.generate_sequences_single_request_no_post.remote(sample, request_index, server_index, partial_output)
         output = await asyncio.wrap_future(output_future.future())
         return output
 
