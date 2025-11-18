@@ -395,11 +395,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                             )
                         for task in done_tasks:
                             await task
-
-                    # double check if there are interaction_tasks can be used
-                    if not self.after_interaction_queue[server_index].empty():
-                        rollout_sample, request_index = await self.after_interaction_queue[server_index].get()
-                        simple_from_after_interaction_queue = True
             else:
                 while len(self.active_tasks[server_index]) + len(self.interaction_tasks[server_index]) >= self.max_concurrent_requests:
                     async with self.lock:
