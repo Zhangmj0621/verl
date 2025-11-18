@@ -793,14 +793,16 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Cancel all rollout tasks
             if self.config.async_training.partial_rollout:
                 await self.async_rollout_manager.cancel()
+            pause_tasks = []
             for server_index in range(len(self.async_rollout_manager.server_handles)):
                 if self.active_tasks[server_index] or self.interaction_tasks[server_index]:
-                    await self._pause_worker_v2(server_index)
-                    # await asyncio.gather(*self.active_tasks, return_exceptions=True)
-                    self.active_tasks[server_index].clear()
-                    self.interaction_tasks[server_index].clear()
-                    print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
-                await self.async_rollout_manager.reset_prefix_cache()
+                    pause_tasks.append(asyncio.create_task(self._pause_worker_v2(server_index)))
+            await asyncio.gather(*pause_tasks, return_exceptions=True)
+            for server_index in range(len(self.async_rollout_manager.server_handles)):
+                self.active_tasks[server_index].clear()
+                self.interaction_tasks[server_index].clear()
+            print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
+            await self.async_rollout_manager.reset_prefix_cache()
             self.monitor_loop_trigger = False
 
     async def resume(self, dependency_ref: ObjectRef = None):
