@@ -419,6 +419,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     if not self.after_interaction_queue[server_index].empty():
                         rollout_sample, request_index = await self.after_interaction_queue[server_index].get()
                         simple_from_after_interaction_queue = True
+                        break
 
             if not simple_from_cancel_queue and not simple_from_after_interaction_queue:
                 async with self.using_sample_lock:
@@ -434,6 +435,15 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         rollout_sample = copy.deepcopy(self.using_rollout_sample)
                         self.using_sample_index += 1
                     self.staleness_samples += 1
+            else:
+                while len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
+                    async with self.lock:
+                        if self.active_tasks[server_index]:
+                            done_tasks, self.active_tasks[server_index] = await asyncio.wait(
+                                self.active_tasks[server_index], return_when=asyncio.FIRST_COMPLETED
+                            )
+                        for task in done_tasks:
+                            await task
 
             if not simple_from_cancel_queue and rollout_sample == "DONE":
                 print(
