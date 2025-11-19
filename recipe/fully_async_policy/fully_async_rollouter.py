@@ -155,6 +155,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         # temp rollout samples
         self.temp_rollout_samples: Dict[str, List] = {}
+        self.temp_rollout_staleness_samples: int = 0
         self.temp_rollout_samples_lock = asyncio.Lock()
 
         self.using_sample_lock = asyncio.Lock()
@@ -215,6 +216,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 + self.result_queue.qsize() * self.config.actor_rollout_ref.rollout.n
                 + self.cancel_queue.qsize()
                 + (await self.message_queue_client.get_queue_size()) * self.config.actor_rollout_ref.rollout.n
+                + self.temp_rollout_staleness_samples
             )
             timing_raw = {}
             idle_ratio = None
@@ -396,7 +398,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         )
                     for task in done_tasks:
                         await task
-                
+
                 if not simple_from_cancel_queue and not simple_from_after_interaction_queue:
                     if not self.after_interaction_queue[server_index].empty():
                         rollout_sample, request_index = await self.after_interaction_queue[server_index].get()
@@ -430,11 +432,11 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     await self._pause_worker(server_index)
                 except Exception as e:
                     raise RuntimeError(f"Exception occurred while pausing worker: {e}")
-                
+
                 async with self.worker_lock[server_index]:
                     while self.paused:
                         await self.condition[server_index].wait()
-                
+
             async with self.worker_lock[server_index]:
                 task = asyncio.create_task(
                     self._process_single_request_streaming(rollout_sample, request_index, server_index),
@@ -501,6 +503,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         else:
             async with self.temp_rollout_samples_lock:
                 self.temp_rollout_samples[rollout_sample.sample_id][1] += 1
+                self.temp_rollout_staleness_samples += 1
             if self.temp_rollout_samples[rollout_sample.sample_id][1] == self.config.actor_rollout_ref.rollout.n:
                 # put into the result_queue
                 rollout_sample = self.temp_rollout_samples[rollout_sample.sample_id][0]
@@ -508,6 +511,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 rollout_sample.rollout_status = await self.get_statistics()
                 await self.result_queue.put(rollout_sample)
                 del self.temp_rollout_samples[rollout_sample.sample_id]
+                self.temp_rollout_staleness_samples -= self.config.actor_rollout_ref.rollout.n
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
@@ -781,8 +785,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 await self.async_rollout_manager.cancel()
             pause_tasks = []
             for server_index in range(len(self.async_rollout_manager.server_handles)):
-                if self.active_tasks[server_index] or self.interaction_tasks[server_index]:
-                    pause_tasks.append(asyncio.create_task(self._pause_worker_v2(server_index)))
+                pause_tasks.append(asyncio.create_task(self._pause_worker_v2(server_index)))
             await asyncio.gather(*pause_tasks, return_exceptions=True)
             for server_index in range(len(self.async_rollout_manager.server_handles)):
                 self.active_tasks[server_index].clear()
