@@ -624,17 +624,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     elif getattr(task, "_kind", None) == "interaction_task":
                         self.interaction_tasks[server_index].remove(task)
 
-                # put all tasks from after_interaction_queue to active_tasks
-                while not self.after_interaction_queue[server_index].empty():
-                    rollout_sample, request_index = await self.after_interaction_queue[server_index].get()
-                    task = asyncio.create_task(
-                        self._process_single_request_streaming(rollout_sample, request_index, server_index),
-                        name=f"{rollout_sample.sample_id}:{request_index}",
-                    )
-                    setattr(task, "_kind", "active_task")
-                    self.active_tasks[server_index].add(task)
-                    self.after_interaction_queue[server_index].task_done()
-
     async def _consumer_worker(self):
         """
         The consumer coroutine is responsible for obtaining the processing results
