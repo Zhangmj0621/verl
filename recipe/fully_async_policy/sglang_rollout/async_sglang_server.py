@@ -125,7 +125,7 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             output = self.req_output[request_id]
             if output is None:
                 return [], [], True  # indicate cancelled
-            
+
             if output["meta_info"]["finish_reason"]["type"] == "abort":
                 self.cancel_event.pop(request_id, None)
                 self.req_output.pop(request_id, None)
@@ -157,7 +157,7 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
         async with self.lock:
             self.paused = True
             self.tokenizer_manager.abort_request(abort_all=True)
-            
+
     async def cancel_request(self, request_id: str):
         # Directly cancel a specific request
         self.tokenizer_manager.abort_request(rid=request_id)
@@ -167,7 +167,8 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             self.paused = False
 
     async def reset_prefix_cache(self):
-        pass
+        async with self.lock:
+            await self.tokenizer_manager.flush_cache()
 
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
