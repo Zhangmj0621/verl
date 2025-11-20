@@ -128,6 +128,9 @@ class RolloutSample:
     param_version_start: list[int]
     param_version_end: list[int]
     rollout_status: dict[str, Any]
+    
+    # request_id
+    request_id: str
 
 
 @dataclass

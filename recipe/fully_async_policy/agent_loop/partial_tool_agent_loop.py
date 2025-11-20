@@ -143,7 +143,7 @@ class PartialToolAgentLoop(AgentLoopBase):
         messages = list(kwargs["raw_prompt"])
         image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
         metrics = {}
-        request_id = uuid4().hex
+        request_id = kwargs.get("request_id", None)
         tools_kwargs = kwargs.get("tools_kwargs", {})
         output: Optional[FullyAsyncAgentLoopOutput] = kwargs.get("output", None)
         param_version = kwargs.get("param_version", 0)
@@ -166,7 +166,7 @@ class PartialToolAgentLoop(AgentLoopBase):
             await interaction.start_interaction(request_id, **interaction_kwargs)
 
         param_version_start = param_version
-        param_version_end = param_version
+        param_version_end = param_version    
         # Create FullyAsyncAgentData instance to encapsulate all state
         agent_data = FullyAsyncAgentData(
             messages=messages,
