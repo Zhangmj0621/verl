@@ -163,7 +163,8 @@ class SGLangHttpServerForPartial(SGLangHttpServerBase):
             self.paused = False
 
     async def reset_prefix_cache(self):
-        pass
+        async with self.lock:
+            await self.tokenizer_manager.flush_cache()
 
 class FullyAsyncSGLangReplica(SGLangReplica):
     def __init__(
