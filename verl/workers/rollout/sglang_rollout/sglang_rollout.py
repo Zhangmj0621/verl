@@ -1617,3 +1617,4 @@ class ServerAdapter(BaseRollout):
 
         if self.device_mesh["infer_tp"].get_local_rank() == 0:
             await self._engine.flush_cache()
+        dist.barrier(self.device_mesh["infer_tp"].get_group())
