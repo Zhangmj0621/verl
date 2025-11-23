@@ -217,6 +217,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 + self.cancel_queue.qsize()
                 + (await self.message_queue_client.get_queue_size()) * self.config.actor_rollout_ref.rollout.n
                 + self.temp_rollout_staleness_samples
+                + sum(queue.qsize() for queue in self.before_interaction_queue)
+                + sum(queue.qsize() for queue in self.after_interaction_queue)
             )
             timing_raw = {}
             idle_ratio = None
@@ -400,7 +402,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         for task in done_tasks:
                             await task
             else:
-                while len(self.active_tasks[server_index]) + len(self.interaction_tasks[server_index]) >= self.max_concurrent_requests:
+                while len(self.active_tasks[server_index]) + len(self.interaction_tasks[server_index]) + self.before_interaction_queue.qsize() + self.after_interaction_queue[server_index].qsize() >= self.max_concurrent_requests:
                     async with self.worker_lock[server_index]:
                         all_tasks = self.active_tasks[server_index] | self.interaction_tasks[server_index]
                         if all_tasks:
