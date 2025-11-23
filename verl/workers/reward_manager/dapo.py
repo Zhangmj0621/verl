@@ -96,6 +96,10 @@ class DAPORewardManager(AbstractRewardManager):
 
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
 
+            num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
+
+            extra_info["num_turns"] = num_turns
+
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
             result = self.compute_score(

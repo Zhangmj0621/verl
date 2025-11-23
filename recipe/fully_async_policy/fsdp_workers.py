@@ -44,35 +44,34 @@ import threading
 from typing import Coroutine, Any
 
 
-def run_async_in_sync(coro: Coroutine) -> Any:
-    result = None
-    exception = None
-    event = threading.Event()
+_loop = None
+_thread = None
+_loop_started = threading.Event()
 
-    def run_in_new_thread():
-        nonlocal result, exception
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
 
-            result = loop.run_until_complete(coro)
+def _ensure_loop():
+    global _loop, _thread
+    if _loop is not None:
+        return _loop
 
-        except Exception as e:
-            exception = e
-        finally:
-            event.set()
+    _loop = asyncio.new_event_loop()
 
-    thread = threading.Thread(target=run_in_new_thread)
-    thread.start()
+    def _run():
+        asyncio.set_event_loop(_loop)
+        _loop_started.set()
+        _loop.run_forever()
 
-    event.wait()
+    _thread = threading.Thread(target=_run, daemon=True)
+    _thread.start()
 
-    thread.join()
+    _loop_started.wait()
+    return _loop
 
-    if exception:
-        raise exception
 
-    return result
+def run_async_in_sync(coro: Coroutine):
+    loop = _ensure_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 def get_inference_model(rollout):
@@ -138,7 +137,6 @@ class DetachNcclSync(AsyncActorRolloutRefWorker):
                     coroutine_to_run = self.rollout.update_weights(single_item_generator)
                     run_async_in_sync(coroutine_to_run)
         get_torch_device().empty_cache()
-
 
 
 class DetachActorWorker(DetachNcclSync):

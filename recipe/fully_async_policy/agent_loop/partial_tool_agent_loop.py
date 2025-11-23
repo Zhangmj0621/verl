@@ -84,9 +84,9 @@ class FullyAsyncAgentData:
         self.tool_calls: list[FunctionCall] = []
 
         # Temporary state for recording version start
-        self.output: Optional[FullyAsyncAgentLoopOutput] = None
-        self.param_version_start: int = 0
-        self.param_version_end: int = 0
+        self.output: Optional[FullyAsyncAgentLoopOutput] = output
+        self.param_version_start: int = param_version_start
+        self.param_version_end: int = param_version_end
 
 
 @register("partial_tool_agent")
@@ -189,14 +189,14 @@ class PartialToolAgentLoop(AgentLoopBase):
                     multi_modal_data=multi_modal_data,
                     response_logprobs=agent_data.response_logprobs[: self.response_length]
                     if agent_data.response_logprobs
-                    else None,
+                    else [],
                     assistant_turns=agent_data.assistant_turns,
                     user_turns=agent_data.user_turns,
                     num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
                     metrics=agent_data.metrics,
                     extra_fields={},
                     is_cancel=True,
-                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+                    log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
                     param_version_start=agent_data.param_version_start,
                     param_version_end=agent_data.param_version_end,
                 )
@@ -217,14 +217,16 @@ class PartialToolAgentLoop(AgentLoopBase):
             multi_modal_data=multi_modal_data,
             response_logprobs=agent_data.response_logprobs[: self.response_length]
             if agent_data.response_logprobs
-            else None,
+            else [],
+            assistant_turns=agent_data.assistant_turns,
+            user_turns=agent_data.user_turns,
             num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
             metrics=agent_data.metrics,
             extra_fields={},
             is_cancel=False,
             param_version_start=agent_data.param_version_start,
             param_version_end=agent_data.param_version_end,
-            log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else None,
+            log_probs=agent_data.response_logprobs[: self.response_length] if agent_data.response_logprobs else [],
         )
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
@@ -261,7 +263,7 @@ class PartialToolAgentLoop(AgentLoopBase):
                 # Resume the paused sample,
                 # add the result directly after prompt_ids,
                 # and reset generate_sequences metric
-                agent_data.prompt_ids = agent_data.output.prompt_ids + agent_data.output.response_ids
+                agent_data.prompt_ids = agent_data.output.prompt_ids
                 agent_data.metrics["generate_sequences"] = agent_data.output.metrics.generate_sequences
                 agent_data.param_version_start = agent_data.output.param_version_start
                 agent_data.response_mask = agent_data.output.response_mask
@@ -274,6 +276,15 @@ class PartialToolAgentLoop(AgentLoopBase):
                 # In the same batch of samples,
                 # some are canceled and some are not.
                 # The samples without partial rollout are returned directly.
+                agent_data.prompt_ids = agent_data.output.prompt_ids
+                agent_data.metrics["generate_sequences"] = agent_data.output.metrics.generate_sequences
+                agent_data.param_version_start = agent_data.output.param_version_start
+                agent_data.response_mask = agent_data.output.response_mask
+                agent_data.response_logprobs = agent_data.output.response_logprobs
+                agent_data.assistant_turns = agent_data.output.assistant_turns
+                agent_data.user_turns = agent_data.output.user_turns
+                agent_data.turn_scores = agent_data.output.extra_fields.get("turn_scores", [])
+                agent_data.tool_rewards = agent_data.output.extra_fields.get("tool_rewards", [])
                 return AgentState.TERMINATED
             
         agent_data.output = None  # Clear output after resuming
