@@ -314,6 +314,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.interaction_tasks = [set() for _ in range(len(self.async_rollout_manager.server_handles))]
         self.result_queue = asyncio.Queue()
         self.cancel_queue = [asyncio.Queue() for _ in range(len(self.async_rollout_manager.server_handles))]
+        self.priority_cancel_queue = [asyncio.Queue() for _ in range(len(self.async_rollout_manager.server_handles))]
+        self.is_priority_cancel_set = [set() for _ in range(len(self.async_rollout_manager.server_handles))]
+        self.is_priority_cancel_set_lock = [asyncio.Lock() for _ in range(len(self.async_rollout_manager.server_handles))]
         self.before_interaction_queue = [asyncio.Queue() for _ in range(len(self.async_rollout_manager.server_handles))]
         self._potential_after_interaction_queue = [asyncio.Queue() for _ in range(len(self.async_rollout_manager.server_handles))]
         self._official_after_interaction_queue = [asyncio.Queue() for _ in range(len(self.async_rollout_manager.server_handles))]
@@ -395,18 +398,19 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             simple_from_cancel_queue = False
             simple_from_official_after_interaction_queue = False
             simple_from_potential_after_interaction_queue = False
+            simple_from_priority_cancel_queue = False
             if not self._official_after_interaction_queue[server_index].empty():
                 rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
                 simple_from_official_after_interaction_queue = True
             elif not self._potential_after_interaction_queue[server_index].empty():
-                rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
                 simple_from_potential_after_interaction_queue = True
             elif not self.cancel_queue[server_index].empty():
-                rollout_sample, request_index = await self.cancel_queue[server_index].get()
                 simple_from_cancel_queue = True
+            elif not self.priority_cancel_queue[server_index].empty():
+                simple_from_priority_cancel_queue = True
 
             # Check whether the number of concurrent tasks exceeds the limit
-            if simple_from_official_after_interaction_queue or simple_from_potential_after_interaction_queue or simple_from_cancel_queue:
+            if simple_from_official_after_interaction_queue or simple_from_potential_after_interaction_queue or simple_from_cancel_queue or simple_from_priority_cancel_queue:
                 if len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                     # Check the request is official candidate sample or potential one
                     if self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
@@ -421,6 +425,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                             abort_handle = asyncio.create_task(_wait_ref(
                                 self.async_rollout_manager.server_handles[server_index].cancel_request.remote(abort_request_id)
                             ))
+                            async with self.is_priority_cancel_set_lock[server_index]:
+                                self.is_priority_cancel_set[server_index].add(abort_request_id)
                         else:
                             while len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                                 async with self.worker_lock[server_index]:
@@ -439,6 +445,13 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                     )
                                 for task in done_tasks:
                                     await task
+                            if not simple_from_official_after_interaction_queue and not self._official_after_interaction_queue[server_index].empty():
+                                rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
+                                simple_from_official_after_interaction_queue = True
+                                simple_from_potential_after_interaction_queue = False
+                                simple_from_cancel_queue = False
+                                simple_from_priority_cancel_queue = False
+                                break
             else:
                 while len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                     async with self.worker_lock[server_index]:
@@ -455,11 +468,23 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         simple_from_official_after_interaction_queue = True
                         break
                     elif not self._potential_after_interaction_queue[server_index].empty():
-                        rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
                         simple_from_potential_after_interaction_queue = True
                         break
+                    elif not self.cancel_queue[server_index].empty():
+                        simple_from_cancel_queue = True
+                        break
+                    elif not self.priority_cancel_queue[server_index].empty():
+                        simple_from_priority_cancel_queue = True
+                        break
+            
+            if simple_from_cancel_queue:
+                rollout_sample, request_index = await self.cancel_queue[server_index].get()
+            elif simple_from_potential_after_interaction_queue:
+                rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
+            elif simple_from_priority_cancel_queue:
+                rollout_sample, request_index = await self.priority_cancel_queue[server_index].get()
 
-            if not simple_from_cancel_queue and not simple_from_official_after_interaction_queue and not simple_from_potential_after_interaction_queue:
+            if not simple_from_cancel_queue and not simple_from_priority_cancel_queue and not simple_from_official_after_interaction_queue and not simple_from_potential_after_interaction_queue:
                 async with self.using_sample_lock:
                     request_index = self.using_sample_index
                     if self.using_sample_index == 0:
@@ -517,6 +542,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 self._official_after_interaction_queue[server_index].task_done()
             elif simple_from_potential_after_interaction_queue:
                 self._potential_after_interaction_queue[server_index].task_done()
+            elif simple_from_priority_cancel_queue:
+                self.priority_cancel_queue[server_index].task_done()
             else:
                 if request_index == 0:
                     self.pending_queue.task_done()
@@ -564,7 +591,13 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         if is_cancel:
             # Put in the cancel queue and wait for the generation to resume
             rollout_sample.agent_loop_output_list[request_index] = agent_loop_output
-            await self.cancel_queue[server_index].put([rollout_sample, request_index])
+            if self.is_priority_cancel_set[server_index].__contains__(rollout_sample.request_id):
+                async with self.is_priority_cancel_set_lock[server_index]:
+                    self.is_priority_cancel_set[server_index].remove(rollout_sample.request_id)
+                # Put into priority cancel queue
+                await self.priority_cancel_queue[server_index].put([rollout_sample, request_index])
+            else:
+                await self.cancel_queue[server_index].put([rollout_sample, request_index])
         elif is_processing_tools or is_interaction:
             # Put into before_interaction_queue
             rollout_sample.agent_loop_output_list[request_index] = agent_loop_output
@@ -633,13 +666,15 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         while self.active_tasks[server_index] or self.interaction_tasks[server_index]:
             simple_from_official_after_interaction_queue = False
             simple_from_potential_after_interaction_queue = False
+            simple_from_priority_cancel_queue = False
             if not self._official_after_interaction_queue[server_index].empty():
                 rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
                 simple_from_official_after_interaction_queue = True
             elif not self._potential_after_interaction_queue[server_index].empty():
-                rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
                 simple_from_potential_after_interaction_queue = True
-            if not simple_from_official_after_interaction_queue and not simple_from_potential_after_interaction_queue:
+            elif not self.priority_cancel_queue[server_index].empty():
+                simple_from_priority_cancel_queue = True
+            if not simple_from_official_after_interaction_queue and not simple_from_potential_after_interaction_queue and not simple_from_priority_cancel_queue:
                 async with self.worker_lock[server_index]:
                     all_tasks = self.active_tasks[server_index] | self.interaction_tasks[server_index]
                     if not all_tasks:
@@ -673,6 +708,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                         abort_handle = asyncio.create_task(_wait_ref(
                             self.async_rollout_manager.server_handles[server_index].cancel_request.remote(abort_request_id)
                         ))
+                        async with self.is_priority_cancel_set_lock[server_index]:
+                            self.is_priority_cancel_set[server_index].add(abort_request_id)
                     else:
                         while len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                             async with self.worker_lock[server_index]:
@@ -682,6 +719,27 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                     )
                                 for task in done_tasks:
                                     await task
+                else:
+                    while len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
+                        async with self.worker_lock[server_index]:
+                            if self.active_tasks[server_index]:
+                                done_tasks, self.active_tasks[server_index] = await asyncio.wait(
+                                    self.active_tasks[server_index], return_when=asyncio.FIRST_COMPLETED
+                                )
+                            for task in done_tasks:
+                                await task
+                            
+                        if not simple_from_official_after_interaction_queue and not self._official_after_interaction_queue[server_index].empty():
+                            rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
+                            simple_from_official_after_interaction_queue = True
+                            simple_from_potential_after_interaction_queue = False
+                            simple_from_priority_cancel_queue = False
+                            break
+                
+            if simple_from_potential_after_interaction_queue:
+                rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
+            elif simple_from_priority_cancel_queue:
+                rollout_sample, request_index = await self.priority_cancel_queue[server_index].get()
             
             # Submit single request processing
             async with self.worker_lock[server_index]:  
@@ -698,6 +756,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 self._official_after_interaction_queue[server_index].task_done()
             elif simple_from_potential_after_interaction_queue:
                 self._potential_after_interaction_queue[server_index].task_done()
+            elif simple_from_priority_cancel_queue:
+                self.priority_cancel_queue[server_index].task_done()
 
     async def _pause_worker(self, server_index: Optional[int] = None):
         """
