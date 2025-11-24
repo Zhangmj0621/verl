@@ -426,8 +426,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                     self.active_tasks.discard(task)
                                 elif kind == "interaction_task":
                                     self.interaction_tasks.discard(task)
-                                for task in done_tasks:
-                                    await task
 
                     if not self.after_interaction_queue.empty():
                         rollout_sample, request_index = await self.after_interaction_queue.get()
