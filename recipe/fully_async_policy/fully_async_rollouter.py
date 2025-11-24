@@ -217,6 +217,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 + self.cancel_queue.qsize()
                 + (await self.message_queue_client.get_queue_size()) * self.config.actor_rollout_ref.rollout.n
                 + self.temp_rollout_staleness_samples
+                + sum(queue.qsize() for queue in self.before_interaction_queue)
+                + sum(queue.qsize() for queue in self.after_interaction_queue)
             )
             timing_raw = {}
             idle_ratio = None
