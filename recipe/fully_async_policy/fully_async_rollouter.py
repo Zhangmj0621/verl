@@ -219,6 +219,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 + sum(queue.qsize() for queue in self.cancel_queue)
                 + (await self.message_queue_client.get_queue_size()) * self.config.actor_rollout_ref.rollout.n
                 + self.temp_rollout_staleness_samples
+                + sum(queue.qsize() for queue in self.before_interaction_queue)
+                + sum(queue.qsize() for queue in self._potential_after_interaction_queue)
+                + sum(queue.qsize() for queue in self._official_after_interaction_queue)
             )
             timing_raw = {}
             idle_ratio = None
@@ -595,8 +598,9 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 rollout_sample.param_version = self.current_param_version
                 rollout_sample.rollout_status = await self.get_statistics()
                 await self.result_queue.put(rollout_sample)
-                del self.temp_rollout_samples[rollout_sample.sample_id]
-                self.temp_rollout_staleness_samples -= self.config.actor_rollout_ref.rollout.n
+                async with self.temp_rollout_samples_lock:
+                    del self.temp_rollout_samples[rollout_sample.sample_id]
+                    self.temp_rollout_staleness_samples -= self.config.actor_rollout_ref.rollout.n
 
     async def _process_single_sample_streaming(self, rollout_sample: RolloutSample):
         """Process a single sample streamingly"""
