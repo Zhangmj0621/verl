@@ -35,9 +35,10 @@ class OrderedSet:
             node.next.prev = node.prev
             if request_id in self.potential_list_index:
                 index = self.potential_list_index.pop(request_id)
-                last_node = self.potential_list[-1]
-                self.potential_list[index] = last_node
-                self.potential_list_index[last_node.request_id] = index
+                if index != len(self.potential_list) - 1:
+                    last_node = self.potential_list[-1]
+                    self.potential_list[index] = last_node
+                    self.potential_list_index[last_node.request_id] = index
                 self.potential_list.pop()
 
     def __contains__(self, request_id: str) -> bool:
@@ -51,16 +52,21 @@ class OrderedSet:
             
     def find_first_potential_candidate_sample(self, is_official_candidate_sample: dict) -> str | None:
         while self.potential_list:
-            candidate_node = self.potential_list[0]
+            candidate_node = self.potential_list[-1]
+            if candidate_node.request_id not in self.map:
+                self.potential_list.pop()
+                self.potential_list_index.pop(candidate_node.request_id, None)
+                continue
+            
             if is_official_candidate_sample.get(candidate_node.request_id, False):
-                # Remove from potential list
                 self.potential_list_index.pop(candidate_node.request_id)
-                self.potential_list.pop(0)
-                return candidate_node.request_id
-            else:
-                # Not an official candidate anymore, remove it
-                self.potential_list_index.pop(candidate_node.request_id)
-                self.potential_list.pop(0)
+                self.potential_list.pop()
+                continue
+            
+            self.potential_list_index.pop(candidate_node.request_id)
+            self.potential_list.pop()
+            return candidate_node.request_id
+                
         return None
     
     def clearall(self):

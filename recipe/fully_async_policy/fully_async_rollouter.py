@@ -413,7 +413,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if simple_from_official_after_interaction_queue or simple_from_potential_after_interaction_queue or simple_from_cancel_queue or simple_from_priority_cancel_queue:
                 if len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                     # Check the request is official candidate sample or potential one
-                    if self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
+                    if simple_from_official_after_interaction_queue and self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
                         # If it's an official candidate sample, it can abort an potential one
                         async with self.is_generation_order_set_lock[server_index]:
                             abort_request_id = self.is_generation_order_set[server_index].find_first_potential_candidate_sample(self.is_official_candidate_sample[server_index])
@@ -476,7 +476,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     elif not self.priority_cancel_queue[server_index].empty():
                         simple_from_priority_cancel_queue = True
                         break
-            
+
             if simple_from_cancel_queue:
                 rollout_sample, request_index = await self.cancel_queue[server_index].get()
             elif simple_from_potential_after_interaction_queue:
@@ -534,7 +534,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 setattr(task, "_kind", "active_task")
                 self.active_tasks[server_index].add(task)
             async with self.is_generation_order_set_lock[server_index]:
-                self.is_generation_order_set[server_index].add(rollout_sample.request_id)
+                self.is_generation_order_set[server_index].add(rollout_sample.request_id, not self.is_official_candidate_sample[server_index][rollout_sample.request_id])
 
             if simple_from_cancel_queue:
                 self.cancel_queue[server_index].task_done()
@@ -617,12 +617,19 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             # Change is_official_candidate_sample
             async with self.is_generation_order_set_lock[server_index]:
                 if self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
-                    if not self.potential_candidate_samples[server_index].empty():
+                    is_fill_new_official = False
+                    while not self.potential_candidate_samples[server_index].empty():
                         next_request_id = await self.potential_candidate_samples[server_index].get()
-                        self.is_official_candidate_sample[server_index][next_request_id] = True
+                        if next_request_id in self.is_official_candidate_sample[server_index]:
+                            self.is_official_candidate_sample[server_index][next_request_id] = True
+                            is_fill_new_official = True
+                            self.potential_candidate_samples[server_index].task_done()
+                            break
                         self.potential_candidate_samples[server_index].task_done()
-                    else:
+                    if not is_fill_new_official:
                         self.official_candidate_sample_cnt[server_index] -= 1
+                else:
+                    self.official_candidate_sample_cnt[server_index] -= 1
                 del self.is_official_candidate_sample[server_index][rollout_sample.request_id]
 
             if self.temp_rollout_samples[rollout_sample.sample_id][1] == self.config.actor_rollout_ref.rollout.n:
@@ -661,7 +668,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             await self.result_queue.put(rollout_sample)
 
         self.processed_sample_count += 1
-        
+
     async def _pause_worker_v3(self, server_index: Optional[int] = None):
         while self.active_tasks[server_index] or self.interaction_tasks[server_index]:
             simple_from_official_after_interaction_queue = False
@@ -696,7 +703,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 continue
             if len(self.active_tasks[server_index]) >= self.max_concurrent_requests:
                 # Check the request is official candidate sample or potential one
-                if self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
+                if simple_from_official_after_interaction_queue and self.is_official_candidate_sample[server_index].get(rollout_sample.request_id, False):
                     # If it's an official candidate sample, it can abort an potential one
                     async with self.is_generation_order_set_lock[server_index]:
                         abort_request_id = self.is_generation_order_set[server_index].find_first_potential_candidate_sample(self.is_official_candidate_sample[server_index])
@@ -728,19 +735,19 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                 )
                             for task in done_tasks:
                                 await task
-                            
+
                         if not simple_from_official_after_interaction_queue and not self._official_after_interaction_queue[server_index].empty():
                             rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
                             simple_from_official_after_interaction_queue = True
                             simple_from_potential_after_interaction_queue = False
                             simple_from_priority_cancel_queue = False
                             break
-                
+
             if simple_from_potential_after_interaction_queue:
                 rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
             elif simple_from_priority_cancel_queue:
                 rollout_sample, request_index = await self.priority_cancel_queue[server_index].get()
-            
+
             # Submit single request processing
             async with self.worker_lock[server_index]:  
                 task = asyncio.create_task(
@@ -750,8 +757,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 setattr(task, "_kind", "active_task")
                 self.active_tasks[server_index].add(task)
             async with self.is_generation_order_set_lock[server_index]:
-                self.is_generation_order_set[server_index].add(rollout_sample.request_id)
-                
+                self.is_generation_order_set[server_index].add(rollout_sample.request_id, not self.is_official_candidate_sample[server_index][rollout_sample.request_id])
+
             if simple_from_official_after_interaction_queue:
                 self._official_after_interaction_queue[server_index].task_done()
             elif simple_from_potential_after_interaction_queue:
@@ -870,7 +877,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if self.consumer_task:
                 self.consumer_task.cancel()
 
-            await asyncio.gather(self.processor_task, self.consumer_task, return_exceptions=True)
+            await asyncio.gather(*self.processor_task, self.consumer_task, return_exceptions=True)
 
         # Send a finish signal
         await self.message_queue_client.put_sample(
@@ -1015,6 +1022,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             "monitor/interaction_tasks_size": sum(len(tasks) for tasks in self.interaction_tasks),
             "monitor/queue/pending_queue_size": self.pending_queue.qsize(),
             "monitor/queue/cancel_queue_size": sum(queue.qsize() for queue in self.cancel_queue),
+            "monitor/queue/priority_cancel_queue_size": sum(queue.qsize() for queue in self.priority_cancel_queue),
             "monitor/queue/result_queue_size": self.result_queue.qsize(),
             "monitor/queue/mq_queue_size": queue_stats["queue_size"],
             # counting stats
