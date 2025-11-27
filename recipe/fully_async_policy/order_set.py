@@ -40,6 +40,7 @@ class OrderedSet:
                     self.potential_list[index] = last_node
                     self.potential_list_index[last_node.request_id] = index
                 self.potential_list.pop()
+            del node
 
     def __contains__(self, request_id: str) -> bool:
         return request_id in self.map
