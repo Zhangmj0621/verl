@@ -182,12 +182,16 @@ class FullyAsyncSGLangReplica(SGLangReplica):
         
     async def cancel(self):
         """Cancel each rollout server."""
-        await asyncio.gather(*[server.cancel.remote() for server in self.servers])
+        # only need to cancel one server to abort all requests(since they are the same sglang engine)
+        await self.servers[0].cancel.remote()
+        #await asyncio.gather(*[server.cancel.remote() for server in self.servers])
 
     async def resume(self):
         """Resume each rollout server."""
-        await asyncio.gather(*[server.resume.remote() for server in self.servers])
+        await self.servers[0].resume.remote()
+        #await asyncio.gather(*[server.resume.remote() for server in self.servers])
 
     async def reset_prefix_cache(self):
         """reset kv cache in each rollout server."""
-        await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])
+        await self.servers[0].reset_prefix_cache.remote()
+        #await asyncio.gather(*[server.reset_prefix_cache.remote() for server in self.servers])
