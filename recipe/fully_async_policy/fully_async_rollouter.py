@@ -38,6 +38,9 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from uuid import uuid4
 from recipe.fully_async_policy.order_set import OrderedSet
 
+import aio.Scheduler.config as scheduler_config
+import aiohttp
+
 @ray.remote(num_cpus=10, max_concurrency=100)
 class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     """
@@ -447,7 +450,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                     )
                                 for task in done_tasks:
                                     await task
-                                    
+
                             if not simple_from_official_after_interaction_queue and not simple_from_cancel_queue: 
                                 if not self._official_after_interaction_queue[server_index].empty():
                                     rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
@@ -488,7 +491,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                     elif not self.priority_cancel_queue[server_index].empty():
                         simple_from_priority_cancel_queue = True
                         break
-                    
+
             if simple_from_potential_after_interaction_queue:
                 rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
             elif simple_from_priority_cancel_queue:
@@ -755,14 +758,14 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                                 )
                             for task in done_tasks:
                                 await task
-                                
+
                         if not simple_from_official_after_interaction_queue and not self._official_after_interaction_queue[server_index].empty():
                             rollout_sample, request_index = await self._official_after_interaction_queue[server_index].get()
                             simple_from_official_after_interaction_queue = True
                             simple_from_potential_after_interaction_queue = False
                             simple_from_priority_cancel_queue = False
                             break
-                
+
             if simple_from_potential_after_interaction_queue:
                 rollout_sample, request_index = await self._potential_after_interaction_queue[server_index].get()
             elif simple_from_priority_cancel_queue:
@@ -1021,6 +1024,72 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             print("[FullyAsyncRollouter][Public][Pause] All active tasks completed")
             await self.async_rollout_manager.reset_prefix_cache()
             self.monitor_loop_trigger = False
+
+    async def start_concurrency_monitor(self):
+        """Start concurrency monitor"""
+        print("[FullyAsyncRollouter][Public][Start Concurrency Monitor]")
+        proxy_url = f"http://{scheduler_config.PROXY_HOST_IP}:{scheduler_config.PROXY_HOST_PORT}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(proxy_url + "/start_monitor_concurrency", timeout=30) as resp:
+                    if resp.status != 200:
+                        error_msg = f"Error: Failed to start concurrency monitor. Status code: {resp.status}"
+                        print(f"[FullyAsyncRollouter] {error_msg}")
+            except Exception as e:
+                error_msg = f"Error: Exception occurred while starting concurrency monitor: {e}"
+                print(f"[FullyAsyncRollouter] {error_msg}")
+                raise e
+
+    async def adjust_environment(self):
+        """Adjust environment before resuming rollout"""
+        print("[FullyAsyncRollouter][Public][Adjust Environment]")
+        # First Calculate max new staleness samples allowed
+        reset_staleness_samples = (
+            sum(len(tasks) for tasks in self.active_tasks)
+            + sum(len(tasks) for tasks in self.interaction_tasks)
+            + self.result_queue.qsize() * self.config.actor_rollout_ref.rollout.n
+            + sum(queue.qsize() for queue in self.cancel_queue)
+            + (await self.message_queue_client.get_queue_size())
+            * self.config.actor_rollout_ref.rollout.n
+            + self.temp_rollout_staleness_samples
+            + sum(queue.qsize() for queue in self.before_interaction_queue)
+            + sum(queue.qsize() for queue in self._potential_after_interaction_queue)
+            + sum(queue.qsize() for queue in self._official_after_interaction_queue)
+        )
+
+        # Get proxy url
+        # First stop concurrency_monitor then auto-scaling
+        proxy_url = f"http://{scheduler_config.PROXY_HOST_IP}:{scheduler_config.PROXY_HOST_PORT}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(proxy_url + "/stop_monitor_concurrency", timeout=30) as resp:
+                    if resp.status != 200:
+                        error_msg = f"Error: Failed to stop concurrency monitor. Status code: {resp.status}"
+                        print(f"[FullyAsyncRollouter] {error_msg}")
+
+                # Now adjust auto-scaling
+                async with session.post(
+                    proxy_url + "/auto_scaling",
+                    params={
+                        "max_concurrent_requests": str(
+                            self.max_required_samples * self.config.actor_rollout_ref.rollout.n - reset_staleness_samples
+                        )
+                    },
+                    timeout=300,
+                ) as adjust_resp:
+                    if adjust_resp.status != 200:
+                        error_msg = f"Error: Failed to adjust auto-scaling. Status code: {adjust_resp.status}"
+                        print(f"[FullyAsyncRollouter] {error_msg}")
+
+                async with session.post(proxy_url + "/start_monitor_concurrency", timeout=30) as start_resp:
+                    if start_resp.status != 200:
+                        error_msg = f"Error: Failed to start concurrency monitor. Status code: {start_resp.status}"
+                        print(f"[FullyAsyncRollouter] {error_msg}")            
+
+            except Exception as e:
+                error_msg = f"Error: Exception occurred while adjusting environment: {e}"
+                print(f"[FullyAsyncRollouter] {error_msg}")
+                raise e
 
     async def resume(self, dependency_ref: ObjectRef = None):
         if dependency_ref is not None:

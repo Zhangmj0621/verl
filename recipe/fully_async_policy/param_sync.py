@@ -81,6 +81,8 @@ class ParameterSynchronizer:
         print(f"[ParameterSynchronizer] Starting weight synchronization (version {self.current_version})...")
 
         ray.get(self.rollouter.pause.remote())
+        
+        self.wait_adjust_environment = self.rollouter.adjust_environment.remote()
 
         # Update MQ version
         self.mq_client.update_param_version_sync(version)
@@ -90,6 +92,9 @@ class ParameterSynchronizer:
         ray.get(self.rollout_wg.sync_rollout_weights())
         end_time = time.time()
         print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds")
+        
+        # Need to wait for environment adjustment to complete since this step may need to stop container
+        ray.get(self.wait_adjust_environment)
 
         # Async Update rollout version & validation
         self.wait_last_update = self.rollouter.update_param_version.remote(version, validate, global_steps)
